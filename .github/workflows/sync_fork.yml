@@ -5,7 +5,7 @@ permissions:
 
 on:
     schedule:
-        - cron: "0 0 * * *"  # 每天午夜执行
+        - cron: "0 21 * * *"  # 北京时间每天 05:00 左右执行（GitHub Actions 可能略有延迟）
     workflow_dispatch:  # 允许手动触发
 
 jobs:
