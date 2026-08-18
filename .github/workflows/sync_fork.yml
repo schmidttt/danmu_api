@@ -1,44 +1,294 @@
-name: Fork Sync
-
-permissions:
-    contents: write
+name: Fork Sync Pull Request
 
 on:
-    schedule:
-        - cron: "0 21 * * *"  # 北京时间每天 05:00 左右执行（GitHub Actions 可能略有延迟）
-    workflow_dispatch:  # 允许手动触发
+  schedule:
+    - cron: "0 21 * * *" # 北京时间每天 05:00 左右
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: fork-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: huangxd-/danmu_api
+  UPSTREAM_BRANCH: main
+  SYNC_BRANCH: upstream-sync
 
 jobs:
-    sync_with_upstream:
-        name: Sync with Upstream
-        runs-on: ubuntu-latest
-        if: ${{ github.event.repository.fork }}
+  sync_with_upstream:
+    name: Propose upstream sync
+    runs-on: ubuntu-latest
+    if: github.event.repository.fork
 
-        steps:
-            - name: Checkout target repo
-              uses: actions/checkout@v4
-              with:
-                token: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
-            - name: Sync Upstream
-              uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
-              with:
-                  target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-                  upstream_sync_repo: huangxd-/danmu_api
-                  upstream_sync_branch: main
-                  target_sync_branch: main
-                  test_mode: false
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-            - name: Check for new commits
-              if: success()
-              run: echo "Sync completed successfully"
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || \
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --prune upstream "${UPSTREAM_BRANCH}"
 
-            - name: Check for Failure
-              if: failure()
-              run: |
-                  echo "[Error] Sync failed. This might be due to:"
-                  echo "1. Changes in the upstream workflow file"
-                  echo "2. Merge conflicts that need manual resolution"
-                  echo "3. Network issues"
-                  echo "Please check the logs and consider manual sync if needed."
-                  exit 1
+      - name: Check for upstream changes
+        id: updates
+        run: |
+          if git merge-base --is-ancestor "upstream/${UPSTREAM_BRANCH}" origin/main; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+            echo "No upstream changes need to be proposed."
+          else
+            echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+            echo "upstream_sha=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Prepare sync branch
+        id: merge
+        if: steps.updates.outputs.has_changes == 'true'
+        run: |
+          git switch -C "${SYNC_BRANCH}" origin/main
+
+          if git merge --no-edit --no-ff "upstream/${UPSTREAM_BRANCH}"; then
+            echo "conflict=false" >> "${GITHUB_OUTPUT}"
+          else
+            conflict_files="$(git diff --name-only --diff-filter=U)"
+            git merge --abort
+            echo "conflict=true" >> "${GITHUB_OUTPUT}"
+            {
+              echo "files<<EOF"
+              printf '%s\n' "${conflict_files}"
+              echo "EOF"
+            } >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Notify owner about merge conflicts
+        if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'true'
+        env:
+          CONFLICT_FILES: ${{ steps.merge.outputs.files }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          issue_title="[automation] Upstream sync requires conflict resolution"
+          issue_number="$(gh issue list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == \"${issue_title}\") | .number" | head -n 1)"
+
+          {
+            echo "@${GITHUB_REPOSITORY_OWNER}"
+            echo
+            echo "The scheduled upstream sync could not be merged safely into main."
+            echo
+            echo "Conflicting files:"
+            printf '%s\n' "${CONFLICT_FILES}"
+            echo
+            echo "Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "No production branch was changed."
+          } > "${RUNNER_TEMP}/upstream-conflict.md"
+
+          if [ -n "${issue_number}" ]; then
+            gh issue comment "${issue_number}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body-file "${RUNNER_TEMP}/upstream-conflict.md"
+          else
+            gh issue create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${issue_title}" \
+              --assignee "${GITHUB_REPOSITORY_OWNER}" \
+              --body-file "${RUNNER_TEMP}/upstream-conflict.md"
+          fi
+
+          exit 1
+
+      - name: Push automation branch
+        if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
+        run: |
+          git fetch origin \
+            "refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
+          git push --force-with-lease origin \
+            "HEAD:refs/heads/${SYNC_BRANCH}"
+
+      - name: Create or update upstream sync pull request
+        id: pull_request
+        if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_SHA: ${{ steps.updates.outputs.upstream_sha }}
+        run: |
+          pr_title="chore: sync upstream main"
+          pr_number="$(gh pr list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base main \
+            --head "${SYNC_BRANCH}" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          {
+            echo "@${GITHUB_REPOSITORY_OWNER}"
+            echo
+            echo "This PR was created automatically from ${UPSTREAM_REPO}:${UPSTREAM_BRANCH}."
+            echo
+            echo "- Upstream commit: ${UPSTREAM_SHA}"
+            echo "- Target branch: main"
+            echo "- Automation branch: ${SYNC_BRANCH}"
+            echo
+            echo "Do not merge until the Node tests, Docker build, and Vercel Preview are successful."
+            echo "If upstream changes overlap local fixes, review the matching and authorization regression tests carefully."
+          } > "${RUNNER_TEMP}/upstream-sync-pr.md"
+
+          if [ -z "${pr_number}" ]; then
+            pr_url="$(gh pr create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --base main \
+              --head "${SYNC_BRANCH}" \
+              --title "${pr_title}" \
+              --assignee "${GITHUB_REPOSITORY_OWNER}" \
+              --body-file "${RUNNER_TEMP}/upstream-sync-pr.md")"
+            pr_number="$(gh pr view "${pr_url}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json number \
+              --jq '.number')"
+          else
+            gh pr edit "${pr_number}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${pr_title}" \
+              --add-assignee "${GITHUB_REPOSITORY_OWNER}" \
+              --body-file "${RUNNER_TEMP}/upstream-sync-pr.md"
+            gh pr comment "${pr_number}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body "@${GITHUB_REPOSITORY_OWNER} The upstream sync proposal was updated to ${UPSTREAM_SHA}."
+            pr_url="$(gh pr view "${pr_number}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json url \
+              --jq '.url')"
+          fi
+
+          echo "number=${pr_number}" >> "${GITHUB_OUTPUT}"
+          echo "url=${pr_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Dispatch branch validation workflows
+        if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          workflows=(test.yml docker-image.yml)
+          declare -A run_ids
+
+          for workflow in "${workflows[@]}"; do
+            gh workflow run "${workflow}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --ref "${SYNC_BRANCH}"
+
+            run_id=""
+            for attempt in {1..30}; do
+              run_id="$(gh run list \
+                --repo "${GITHUB_REPOSITORY}" \
+                --workflow "${workflow}" \
+                --branch "${SYNC_BRANCH}" \
+                --event workflow_dispatch \
+                --limit 20 \
+                --json databaseId,headSha \
+                --jq ".[] | select(.headSha == \"${head_sha}\") | .databaseId" | head -n 1)"
+              if [ -n "${run_id}" ]; then
+                break
+              fi
+              sleep 2
+            done
+
+            if [ -z "${run_id}" ]; then
+              echo "Could not locate the dispatched ${workflow} run." >&2
+              exit 1
+            fi
+
+            run_ids["${workflow}"]="${run_id}"
+          done
+
+          for workflow in "${workflows[@]}"; do
+            gh run watch "${run_ids[$workflow]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --exit-status
+          done
+
+      - name: Notify owner that validation passed
+        if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pull_request.outputs.number }}
+        run: |
+          gh pr comment "${PR_NUMBER}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --body "@${GITHUB_REPOSITORY_OWNER} Automated Node and Docker validation passed. Review the diff and Vercel Preview before merging."
+
+          for issue_title in \
+            "[automation] Upstream sync requires conflict resolution" \
+            "[automation] Upstream sync workflow failed"; do
+            issue_number="$(gh issue list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --state open \
+              --limit 100 \
+              --json number,title \
+              --jq ".[] | select(.title == \"${issue_title}\") | .number" | head -n 1)"
+            if [ -n "${issue_number}" ]; then
+              gh issue close "${issue_number}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --comment "Resolved by upstream sync PR #${PR_NUMBER}."
+            fi
+          done
+
+      - name: Report unexpected workflow failure
+        if: failure() && steps.merge.outputs.conflict != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          issue_title="[automation] Upstream sync workflow failed"
+          issue_number="$(gh issue list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == \"${issue_title}\") | .number" | head -n 1)"
+
+          {
+            echo "@${GITHUB_REPOSITORY_OWNER}"
+            echo
+            echo "The upstream sync workflow failed before it could complete safely."
+            echo
+            echo "Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Review the failed step. No automatic merge into main was performed."
+          } > "${RUNNER_TEMP}/upstream-failure.md"
+
+          if [ -n "${issue_number}" ]; then
+            gh issue comment "${issue_number}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body-file "${RUNNER_TEMP}/upstream-failure.md"
+          else
+            gh issue create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${issue_title}" \
+              --assignee "${GITHUB_REPOSITORY_OWNER}" \
+              --body-file "${RUNNER_TEMP}/upstream-failure.md"
+          fi
+
+      - name: Record no-change result
+        if: steps.updates.outputs.has_changes != 'true'
+        run: echo "The fork already contains the latest upstream commit."
