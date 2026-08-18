@@ -23,6 +23,13 @@ import {
 
 let globals;
 
+function isAdminOnlySystemRoute(path, method) {
+  if (/^\/api\/(?:env|cache|cookie)(?:\/|$)/.test(path)) return true;
+  if (path === "/api/deploy" && method === "POST") return true;
+  if (path === "/api/ai/verify" && method === "POST") return true;
+  return path === "/api/logs/clear" && method === "POST";
+}
+
 async function handleRequest(req, env, deployPlatform, clientIp) {
   // 加载全局变量和环境变量配置
   globals = Globals.init(env);
@@ -102,6 +109,17 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
     if (globals.favoriteRequireAdmin && (!globals.adminToken || explicitToken !== globals.adminToken)) {
       return jsonResponse(
         { errorCode: 403, success: false, message: "权限不足", errorMessage: "Favorite API requires ADMIN_TOKEN" },
+        403
+      );
+    }
+  }
+
+  // 系统配置、缓存、Cookie 与部署接口必须显式使用 ADMIN_TOKEN。
+  // 普通日志/请求记录读取仍由后续脱敏逻辑保持兼容。
+  if (method !== "OPTIONS" && isAdminOnlySystemRoute(tokenlessPath, method)) {
+    if (!globals.adminToken || explicitToken !== globals.adminToken) {
+      return jsonResponse(
+        { errorCode: 403, success: false, message: "权限不足", errorMessage: "ADMIN_TOKEN required" },
         403
       );
     }
