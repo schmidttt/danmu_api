@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,7 +15,7 @@ permissions:
 jobs:
   build:
     # PRs validate the image without secrets. Publishing is limited to upstream main.
-    if: github.event_name == 'pull_request' || github.repository == 'huangxd-/danmu_api'
+    if: github.event_name != 'push' || github.repository == 'huangxd-/danmu_api'
     runs-on: ubuntu-latest
 
     steps:
@@ -57,8 +58,8 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # PR 构建不登录、不推送，避免 fork 因无法读取 secrets 而失败
-      - name: Build Docker image for pull request
-        if: github.event_name == 'pull_request'
+      - name: Build Docker image without publishing
+        if: github.event_name != 'push'
         run: |
           docker buildx build --platform linux/amd64,linux/arm64 \
             -t danmu-api:${{ env.VERSION_TAG }} \
