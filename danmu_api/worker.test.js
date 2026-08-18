@@ -5,7 +5,7 @@ dotenv.config();
 import test from 'node:test';
 import assert from 'node:assert';
 import { handleRequest } from './worker.js';
-import { extractTitleSeasonEpisode, getBangumi, getComment, getCommentByUrl, matchAnime, searchAnime, buildSearchAnimeUrl } from "./apis/dandan-api.js";
+import { extractTitleSeasonEpisode, getBangumi, getComment, getCommentByUrl, matchAnime, searchAnime, buildSearchAnimeUrl, filterSameEpisodeTitle, findEpisodeByNumber } from "./apis/dandan-api.js";
 import { handleFavoriteRefresh } from './apis/favorite-api.js';
 import { handleClearCache } from './apis/system-api.js';
 import { getRedisCaches, getRedisKey, pingRedis, setRedisKey, setRedisKeyWithExpiry, updateRedisCaches } from "./utils/redis-util.js";
@@ -181,6 +181,48 @@ test('worker.js API endpoints', async (t) => {
   const hongguoSource = new HongguoSource();
   const animekoSource = new AnimekoSource();
   const otherSource = new OtherSource();
+
+  await t.test('episode matching prefers main content while preserving platform candidates', () => {
+    const perfectWorldEpisodes = [
+      { episodeNumber: 281, episodeTitle: '【bilibili】第281集', episodeId: 'main-281' },
+      { episodeNumber: 282, episodeTitle: '【bilibili】第282集出场人物表', episodeId: 'characters-282' },
+      { episodeNumber: 283, episodeTitle: '【bilibili】第282集', episodeId: 'main-282' }
+    ];
+    assert.equal(findEpisodeByNumber(perfectWorldEpisodes, 282, 282).episodeId, 'main-282');
+
+    const insertedSupplementEpisodes = [
+      { episodeNumber: 1, episodeTitle: '【qq】第1集', episodeId: 'main-1' },
+      { episodeNumber: 2, episodeTitle: '【qq】角色关系图', episodeId: 'relation-chart' },
+      { episodeNumber: 3, episodeTitle: '【qq】第2集', episodeId: 'main-2' }
+    ];
+    assert.equal(findEpisodeByNumber(insertedSupplementEpisodes, 2, 2).episodeId, 'main-2');
+
+    const reversedEpisodes = [
+      { episodeNumber: 1, episodeTitle: '【bilibili】第12集', episodeId: 'main-12' },
+      { episodeNumber: 2, episodeTitle: '【bilibili】第11集', episodeId: 'main-11' }
+    ];
+    assert.equal(findEpisodeByNumber(reversedEpisodes, 11, 11).episodeId, 'main-11');
+
+    const titlelessEpisodes = [
+      { episodeNumber: 1, episodeTitle: '【other】上篇', episodeId: 'part-1' },
+      { episodeNumber: 2, episodeTitle: '【other】下篇', episodeId: 'part-2' }
+    ];
+    assert.equal(findEpisodeByNumber(titlelessEpisodes, 2, 2).episodeId, 'part-2');
+    assert.equal(findEpisodeByNumber(reversedEpisodes, 1, 2).episodeId, 'main-11');
+
+    const platformVariants = [
+      { episodeNumber: 1, episodeTitle: '【qq】第1集', episodeId: 'qq-1' },
+      { episodeNumber: 2, episodeTitle: '【bilibili】第1集', episodeId: 'bilibili-1' }
+    ];
+    assert.equal(filterSameEpisodeTitle(platformVariants).length, 1);
+    const selectable = filterSameEpisodeTitle(platformVariants, { dedupeByEpisodeNumber: false });
+    assert.equal(selectable.length, 2);
+    assert.equal(findEpisodeByNumber(selectable, 1, 1, 'bilibili1').episodeId, 'bilibili-1');
+
+    const defaultConfig = Globals.init({ LOG_LEVEL: 'error' });
+    assert.equal(defaultConfig.episodeTitleFilter.test('【bilibili】第282集出场人物表'), true);
+    assert.equal(defaultConfig.episodeTitleFilter.test('【bilibili】第282集 完美世界'), false);
+  });
 
   await t.test('GET / should return welcome message', async () => {
     const req = new MockRequest(urlPrefix, { method: 'GET' });
@@ -906,6 +948,52 @@ test('worker.js API endpoints', async (t) => {
       );
       assert.equal(adminResponse.status, 200);
       assert.deepEqual((await parseResponse(adminResponse)).favorites, []);
+    });
+
+    await t.test('system mutation routes require an explicit ADMIN_TOKEN', async () => {
+      Globals.searchCache = new Map([['protected-cache', { timestamp: Date.now() }]]);
+
+      const missingAdminResponse = await handleRequest(new Request('http://localhost/api/cache/clear', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: ['searchCache'] })
+      }), {}, 'cloudflare', '127.0.0.1', {});
+      assert.equal(missingAdminResponse.status, 403);
+      assert.equal(Globals.searchCache.has('protected-cache'), true);
+
+      const env = { TOKEN: 'cache-user-token', ADMIN_TOKEN: 'cache-admin-token' };
+      const protectedRoutes = [
+        ['POST', '/api/env/set'],
+        ['POST', '/api/deploy'],
+        ['GET', '/api/cache/animes'],
+        ['POST', '/api/cache/clear'],
+        ['GET', '/api/cookie/status'],
+        ['POST', '/api/ai/verify'],
+        ['POST', '/api/logs/clear']
+      ];
+      for (const [method, path] of protectedRoutes) {
+        const userResponse = await handleRequest(
+          new Request(`http://localhost/cache-user-token${path}`, { method }),
+          env, 'cloudflare', '127.0.0.1', {}
+        );
+        assert.equal(userResponse.status, 403, `${method} ${path}`);
+        assert.equal((await parseResponse(userResponse)).errorMessage, 'ADMIN_TOKEN required');
+      }
+      assert.equal(Globals.searchCache.has('protected-cache'), true);
+
+      const maskedLogsResponse = await handleRequest(
+        new Request('http://localhost/cache-user-token/api/logs'),
+        env, 'cloudflare', '127.0.0.1', {}
+      );
+      assert.equal(maskedLogsResponse.status, 200);
+
+      const adminResponse = await handleRequest(new Request('http://localhost/cache-admin-token/api/cache/clear', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items: ['searchCache'] })
+      }), env, 'cloudflare', '127.0.0.1', {});
+      assert.equal(adminResponse.status, 200);
+      assert.equal(Globals.searchCache.size, 0);
     });
 
     await t.test('manual favorite keeps the search keyword and uses the first result image', async () => {
