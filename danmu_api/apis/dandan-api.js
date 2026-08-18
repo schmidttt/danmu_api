@@ -1477,7 +1477,7 @@ async function matchAniAndEp(season, episode, year, searchData, title, req, plat
     if (!bangumiData?.success || !bangumiData?.bangumi?.episodes) {
       continue;
     }
-    
+
     // 只记录匹配摘要，避免大剧集列表占满 serverless 日志额度。
     log("info", "判断剧集", `Anime: ${anime.animeTitle}`);
     log("info", `[match] bangumiId=${bangumiData.bangumi.animeId ?? anime.bangumiId ?? anime.animeId}, episodes=${bangumiData.bangumi.episodes.length}`);
@@ -1485,7 +1485,7 @@ async function matchAniAndEp(season, episode, year, searchData, title, req, plat
     let matchedEpisode = null;
 
     // 判定当前循环的 anime 是否为用户手动指定的优选偏好
-    const isPreferredAnime = globals.rememberLastSelect && preferAnimeId != null && 
+    const isPreferredAnime = globals.rememberLastSelect && preferAnimeId != null &&
         (String(anime.bangumiId) === String(preferAnimeId) || String(anime.animeId) === String(preferAnimeId));
 
     if (season && episode) {
