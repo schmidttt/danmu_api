@@ -317,6 +317,9 @@ export async function httpGet(url, options = {}) {
 }
 
 export async function httpPost(url, body, options = {}) {
+  const logUrl = options.redactUrl === true
+    ? `${String(url).split('?')[0]}?[redacted]`
+    : url;
   // 从 options 中获取重试次数，默认为 0
   const maxRetries = parseInt(options.retries || '0', 10) || 0;
   const validStatusCodes = Array.isArray(options.validStatusCodes) ? options.validStatusCodes : [];
@@ -327,7 +330,7 @@ export async function httpPost(url, body, options = {}) {
     const currentSource = sourceLogContext.getStore() || "system";
 
     if (attempt > 0) {
-      log("info", `[${currentSource}] [请求模拟] 第 ${attempt} 次重试: ${url}`);
+      log("info", `[${currentSource}] [请求模拟] 第 ${attempt} 次重试: ${logUrl}`);
       // 针对网络层物理阻断（如 ETIMEDOUT, ECONNRESET, AbortError）取消长退避，实现快速重试
       // 常规服务端报错（如 502, 429）保持指数退避逻辑
       if (lastError && (lastError.cause?.code === 'ETIMEDOUT' || lastError.cause?.code === 'ECONNRESET' || lastError.name === 'AbortError')) {
@@ -336,7 +339,7 @@ export async function httpPost(url, body, options = {}) {
         await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, attempt - 1), 5000)));
       }
     } else {
-      log("info", `[${currentSource}] [请求模拟] HTTP POST: ${url}`);
+      log("info", `[${currentSource}] [请求模拟] HTTP POST: ${logUrl}`);
     }
 
     // 设置超时时间（默认5秒）
@@ -415,13 +418,13 @@ export async function httpPost(url, body, options = {}) {
       if (error.name === 'AbortError') {
         log("error", `[${currentSource}] [请求模拟] 请求超时:`, error.message);
         log("error", '详细诊断:');
-        log("error", '- URL:', url);
+        log("error", '- URL:', logUrl);
         log("error", '- 超时时间:', `${timeout}ms`);
         log("error", `- 当前尝试: ${attempt + 1}/${maxRetries + 1}`);
       } else {
         log("error", `[${currentSource}] [请求模拟] 请求失败:`, error.message);
         log("error", '详细诊断:');
-        log("error", '- URL:', url);
+        log("error", '- URL:', logUrl);
         log("error", '- 错误类型:', error.name);
         log("error", '- 消息:', error.message);
         log("error", `- 当前尝试: ${attempt + 1}/${maxRetries + 1}`);
