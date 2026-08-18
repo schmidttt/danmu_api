@@ -11,6 +11,42 @@ import { SegmentListResponse } from '../models/dandan-model.js';
 // =====================
 // 获取优酷弹幕
 // =====================
+export async function mapWithConcurrency(items, concurrency, mapper) {
+  const values = Array.isArray(items) ? items : [];
+  if (values.length === 0) return [];
+
+  const limit = Math.min(Math.max(Number(concurrency) || 1, 1), values.length);
+  const results = new Array(values.length);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (true) {
+      const currentIndex = nextIndex++;
+      if (currentIndex >= values.length) return;
+
+      try {
+        results[currentIndex] = {
+          status: 'fulfilled',
+          value: await mapper(values[currentIndex], currentIndex)
+        };
+      } catch (reason) {
+        results[currentIndex] = { status: 'rejected', reason };
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: limit }, () => worker()));
+  return results;
+}
+
+function readHeader(headers, name) {
+  if (!headers) return null;
+  if (typeof headers.get === 'function') return headers.get(name);
+
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry ? entry[1] : null;
+}
+
 export default class YoukuSource extends BaseSource {
   convertYoukuUrl(url) {
     // 使用正则表达式提取 vid 参数
@@ -390,7 +426,7 @@ export default class YoukuSource extends BaseSource {
     return 'drama';
   }
 
-   async getEpisodeDanmu(id) {
+  async getEpisodeDanmu(id) {
     log("info", "[youku] 开始从本地请求优酷弹幕...", id);
 
     if (!id) {
@@ -399,46 +435,41 @@ export default class YoukuSource extends BaseSource {
 
     // 获取分片URL列表
     const segmentListResponse = await this.getEpisodeDanmuSegments(id);
-    const segmentList = segmentListResponse.segmentList;
+    const segmentList = Array.isArray(segmentListResponse?.segmentList) ? segmentListResponse.segmentList : [];
+    if (segmentList.length === 0) return [];
 
     let contents = [];
 
-    // 并发限制（可通过环境变量 YOUKU_CONCURRENCY 配置，默认 8）
+    // 固定批次会被最慢请求拖住；工作池会在任意分段完成后立即补充下一个任务。
     const concurrency = globals.youkuConcurrency;
-    const segments = [...segmentList];
-
-    for (let i = 0; i < segments.length; i += concurrency) {
-      const batch = segments.slice(i, i + concurrency).map(async (segment) => {
-        const response = await httpPost(segment.url, buildQueryString({ data: segment.data }), {
-          headers: {
-            "Cookie": `_m_h5_tk=${segment._m_h5_tk};_m_h5_tk_enc=${segment._m_h5_tk_enc};`,
-            "Referer": "https://v.youku.com",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36",
-          },
-          allow_redirects: false,
-          retries: 1,
-        });
-
-        const results = [];
-        if (response.data?.data && response.data.data.result) {
-          const result = JSON.parse(response.data.data.result);
-          if (result.code !== "-1") {
-            results.push(...result.data.result);
-          }
-        }
-        return results;
+    const settled = await mapWithConcurrency(segmentList, concurrency, async (segment) => {
+      const response = await httpPost(segment.url, buildQueryString({ data: segment.data }), {
+        headers: {
+          "Cookie": `_m_h5_tk=${segment._m_h5_tk};_m_h5_tk_enc=${segment._m_h5_tk_enc};`,
+          "Referer": "https://v.youku.com",
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36",
+        },
+        allow_redirects: false,
+        retries: 1,
+        redactUrl: true,
       });
 
-      try {
-        const settled = await Promise.allSettled(batch);
-        for (const s of settled) {
-          if (s.status === "fulfilled" && Array.isArray(s.value)) {
-            contents = contents.concat(s.value);
-          }
+      const results = [];
+      if (response.data?.data && response.data.data.result) {
+        const result = JSON.parse(response.data.data.result);
+        if (result.code !== "-1") {
+          results.push(...result.data.result);
         }
-      } catch (e) {
-        log("error", "[youku] 优酷分段批量请求失败:", e.message);
+      }
+      return results;
+    });
+
+    for (const result of settled) {
+      if (result.status === "fulfilled" && Array.isArray(result.value)) {
+        contents = contents.concat(result.value);
+      } else if (result.status === 'rejected') {
+        log("warn", `[youku] 优酷分段请求失败: ${result.reason?.message || result.reason}`);
       }
     }
 
@@ -478,7 +509,10 @@ export default class YoukuSource extends BaseSource {
       log("info", "[youku]", path);
     } else {
       log("error", "[youku] Invalid URL");
-      return [];
+      return new SegmentListResponse({
+        "type": "youku",
+        "segmentList": []
+      });
     }
     const video_id = path[path.length - 1].split(".")[0].slice(3);
 
@@ -497,12 +531,22 @@ export default class YoukuSource extends BaseSource {
       });
     } catch (error) {
       log("error", "[youku] 请求视频信息失败:", error);
-      return [];
+      return new SegmentListResponse({
+        "type": "youku",
+        "segmentList": []
+      });
     }
 
     const data = typeof res.data === "string" ? JSON.parse(res.data) : res.data;
     const title = data.title;
-    const duration = data.duration;
+    const duration = Number(data.duration);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      log("error", "[youku] 视频时长无效");
+      return new SegmentListResponse({
+        "type": "youku",
+        "segmentList": []
+      });
+    }
     log("info", `[youku] 标题: ${title}, 时长: ${duration}`);
 
     // 获取 cna 和 tk_enc
@@ -517,29 +561,20 @@ export default class YoukuSource extends BaseSource {
         },
         allow_redirects: false
       });
-      log("info", `[youku] cnaRes: ${JSON.stringify(cnaRes)}`);
-      log("info", `[youku] cnaRes.headers: ${JSON.stringify(cnaRes.headers)}`);
-      const etag = cnaRes.headers["etag"] || cnaRes.headers["Etag"];
-      log("info", `[youku] etag: ${etag}`);
-      // const match = cnaRes.headers["set-cookie"].match(/cna=([^;]+)/);
-      // cna = match ? match[1] : null;
-      cna = etag.replace(/^"|"$/g, '');
-      log("info", `[youku] cna: ${cna}`);
+      const cnaSetCookie = String(readHeader(cnaRes?.headers, 'set-cookie') || '');
+      const cnaCookieMatch = cnaSetCookie.match(/(?:^|[,;]\s*)cna=([^;]+)/i);
+      const etag = String(readHeader(cnaRes?.headers, 'etag') || '').replace(/^"|"$/g, '');
+      cna = cnaCookieMatch?.[1] || etag;
+      if (!cna) throw new Error('响应中缺少 cna');
 
-      let tkEncRes;
-      while (!tkEncRes) {
-        tkEncRes = await httpGet(tkEncUrl, {
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36",
-          },
-          allow_redirects: false
-        });
-      }
-      log("info", `[youku] tkEncRes: ${JSON.stringify(tkEncRes)}`);
-      log("info", `[youku] tkEncRes.headers: ${JSON.stringify(tkEncRes.headers)}`);
-      const tkEncSetCookie = tkEncRes.headers["set-cookie"] || tkEncRes.headers["Set-Cookie"];
-      log("info", `[youku] tkEncSetCookie: ${tkEncSetCookie}`);
+      const tkEncRes = await httpGet(tkEncUrl, {
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36",
+        },
+        allow_redirects: false
+      });
+      const tkEncSetCookie = String(readHeader(tkEncRes?.headers, 'set-cookie') || '');
 
       // 获取 _m_h5_tk_enc
       const tkEncMatch = tkEncSetCookie.match(/_m_h5_tk_enc=([^;]+)/);
@@ -548,12 +583,15 @@ export default class YoukuSource extends BaseSource {
       // 获取 _m_h5_tkh
       const tkH5Match = tkEncSetCookie.match(/_m_h5_tk=([^;]+)/);
       _m_h5_tk = tkH5Match ? tkH5Match[1] : null;
+      if (!_m_h5_tk_enc || !_m_h5_tk) throw new Error('响应中缺少临时令牌');
 
-      log("info", `[youku] _m_h5_tk_enc: ${_m_h5_tk_enc}`);
-      log("info", `[youku] _m_h5_tk: ${_m_h5_tk}`);
+      log("info", "[youku] 已获取弹幕请求所需临时凭据");
     } catch (error) {
-      log("error", "[youku] 获取 cna 或 tk_enc 失败:", error);
-      return [];
+      log("error", `[youku] 获取弹幕临时凭据失败: ${error.message}`);
+      return new SegmentListResponse({
+        "type": "youku",
+        "segmentList": []
+      });
     }
 
     // 计算弹幕分段请求
@@ -634,8 +672,6 @@ export default class YoukuSource extends BaseSource {
 
       const queryString = buildQueryString(params);
       const url = `${api_danmaku}?${queryString}`;
-      log("info", `[youku] piece_url: ${url}`);
-
       return {
         "type": "youku",
         "segment_start": mat * step,
@@ -660,7 +696,7 @@ export default class YoukuSource extends BaseSource {
   }
 
   async getEpisodeSegmentDanmu(segment) {
-    log("info", "[youku] 开始从本地请求优酷分段弹幕...", segment.url);
+    log("info", "[youku] 开始从本地请求优酷分段弹幕...");
 
     const response = await httpPost(segment.url, buildQueryString({ data: segment.data }), {
       headers: {
@@ -671,6 +707,7 @@ export default class YoukuSource extends BaseSource {
       },
       allow_redirects: false,
       retries: 1,
+      redactUrl: true,
     });
 
     const results = [];

@@ -5,9 +5,10 @@ dotenv.config();
 import test from 'node:test';
 import assert from 'node:assert';
 import { handleRequest } from './worker.js';
-import { extractTitleSeasonEpisode, getBangumi, getComment, getCommentByUrl, matchAnime, searchAnime, buildSearchAnimeUrl, filterSameEpisodeTitle, findEpisodeByNumber } from "./apis/dandan-api.js";
+import { extractTitleSeasonEpisode, getBangumi, getComment, getCommentByUrl, matchAnime, searchAnime, buildSearchAnimeUrl, filterSameEpisodeTitle, findEpisodeByNumber, resolveSearchFallbackSources } from "./apis/dandan-api.js";
 import { handleFavoriteRefresh } from './apis/favorite-api.js';
 import { handleClearCache } from './apis/system-api.js';
+import { httpPost } from './utils/http-util.js';
 import { getRedisCaches, getRedisKey, pingRedis, setRedisKey, setRedisKeyWithExpiry, updateRedisCaches } from "./utils/redis-util.js";
 import { getLocalRedisKey, setLocalRedisKey, setLocalRedisKeyWithExpiry } from "./utils/local-redis-util.js";
 import { getImdbepisodes } from "./utils/imdb-util.js";
@@ -21,7 +22,7 @@ import TencentSource from "./sources/tencent.js";
 import IqiyiSource from "./sources/iqiyi.js";
 import MangoSource from "./sources/mango.js";
 import BilibiliSource from "./sources/bilibili.js";
-import YoukuSource from "./sources/youku.js";
+import YoukuSource, { mapWithConcurrency } from "./sources/youku.js";
 import MiguSource from "./sources/migu.js";
 import SohuSource from "./sources/sohu.js";
 import LeshiSource from "./sources/leshi.js";
@@ -39,7 +40,7 @@ import { EdgeoneHandler } from "./configs/handlers/edgeone-handler.js";
 import { HuggingfaceHandler } from "./configs/handlers/huggingface-handler.js";
 import { HandlerFactory } from "./configs/handlers/handler-factory.js";
 import { Globals } from "./configs/globals.js";
-import { addAnime, addEpisode, getSearchCache, hasSeasonSpecificPreference, isSearchCacheValid, setSearchCache } from "./utils/cache-util.js";
+import { addAnime, addEpisode, getCommentCache, getSearchCache, hasSeasonSpecificPreference, isSearchCacheValid, setCommentCache, setSearchCache } from "./utils/cache-util.js";
 import { addFavorite, listFavorites, loadFavorites, removeFavorite, resolveFavoriteForKeyword, saveFavorites } from './utils/favorite-util.js';
 import { candidateMatchesMappingQualifiers, candidateMatchesMappingTitle, parseAutoMatchMappingRules, resolveAutoMatchMapping } from './utils/auto-match-mapping-util.js';
 import { HTML_TEMPLATE } from './ui/template.js';
@@ -222,6 +223,115 @@ test('worker.js API endpoints', async (t) => {
     const defaultConfig = Globals.init({ LOG_LEVEL: 'error' });
     assert.equal(defaultConfig.episodeTitleFilter.test('【bilibili】第282集出场人物表'), true);
     assert.equal(defaultConfig.episodeTitleFilter.test('【bilibili】第282集 完美世界'), false);
+  });
+
+  await t.test('reliability defaults use mainstream sources, preserve fallback order, and cache small results', () => {
+    const config = Globals.init({
+      LOG_LEVEL: 'error',
+      COMMENT_CACHE_MIN_COUNT: '1',
+      COMMENT_CACHE_MINUTES: '3'
+    });
+    Globals.commentCache = new Map();
+
+    assert.deepEqual(config.sourceOrderArr, ['tencent', 'iqiyi', 'youku', 'imgo', 'bilibili', 'migu']);
+    assert.equal(config.youkuConcurrency, 16);
+    assert.equal(config.commentCacheMinCount, 1);
+    assert.deepEqual(
+      resolveSearchFallbackSources(
+        ['douban', '360', 'renren', 'hanjutv'],
+        ['tencent', 'iqiyi', 'youku', 'imgo', 'bilibili', 'migu', '360', 'douban', 'douban']
+      ),
+      ['tencent', 'iqiyi', 'youku', 'imgo', 'bilibili', 'migu']
+    );
+
+    const comments = Array.from({ length: 51 }, (_, index) => ({ m: `comment-${index}` }));
+    setCommentCache('migu:test-small-result', comments);
+    assert.equal(getCommentCache('migu:test-small-result')?.length, 51);
+
+    resetSearchState();
+  });
+
+  await t.test('search executes configured fallback only after primary sources return no candidates', async () => {
+    const originalTencentSearch = TencentSource.prototype.search;
+    const originalTencentHandle = TencentSource.prototype.handleAnimes;
+    const originalIqiyiSearch = IqiyiSource.prototype.search;
+    const originalIqiyiHandle = IqiyiSource.prototype.handleAnimes;
+    const calls = [];
+
+    TencentSource.prototype.search = async () => {
+      calls.push('tencent');
+      return [];
+    };
+    TencentSource.prototype.handleAnimes = async () => {};
+    IqiyiSource.prototype.search = async () => {
+      calls.push('iqiyi');
+      return [{ title: '兜底测试' }];
+    };
+    IqiyiSource.prototype.handleAnimes = async (_source, _title, results, details) => {
+      const anime = createFavoriteAnime('兜底测试', 1, 930100);
+      anime.source = 'iqiyi';
+      anime.links.forEach(link => { link.title = link.title.replace('【qq】', '【qiyi】'); });
+      results.push(anime);
+      details.set(String(anime.animeId), anime);
+    };
+
+    try {
+      resetSearchState();
+      Globals.init({
+        SOURCE_ORDER: 'tencent',
+        SOURCE_FALLBACK_ORDER: 'iqiyi',
+        LOG_LEVEL: 'error'
+      });
+      const response = await searchAnime(new URL('http://localhost/api/v2/search/anime?keyword=%E5%85%9C%E5%BA%95%E6%B5%8B%E8%AF%95'));
+      const body = await parseResponse(response);
+
+      assert.deepEqual(calls, ['tencent', 'iqiyi']);
+      assert.equal(body.animes.length, 1);
+      assert.equal(body.animes[0].source, 'iqiyi');
+    } finally {
+      TencentSource.prototype.search = originalTencentSearch;
+      TencentSource.prototype.handleAnimes = originalTencentHandle;
+      IqiyiSource.prototype.search = originalIqiyiSearch;
+      IqiyiSource.prototype.handleAnimes = originalIqiyiHandle;
+      resetSearchState();
+    }
+  });
+
+  await t.test('Youku worker pool caps concurrency, preserves order, and isolates failures', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const settled = await mapWithConcurrency([25, 5, 10, 1], 2, async (delay, index) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      active--;
+      if (index === 2) throw new Error('expected segment failure');
+      return index;
+    });
+
+    assert.equal(maxActive, 2);
+    assert.deepEqual(settled.map(result => result.status), ['fulfilled', 'fulfilled', 'rejected', 'fulfilled']);
+    assert.equal(settled[0].value, 0);
+    assert.equal(settled[3].value, 3);
+  });
+
+  await t.test('sensitive signed request URLs are redacted from runtime logs', async () => {
+    Globals.init({ LOG_LEVEL: 'info' });
+    Globals.logBuffer = [];
+
+    await withMockFetch(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () => JSON.stringify({ success: true })
+    }), async () => {
+      await httpPost('https://example.com/comments?sign=temporary-secret&t=123', '', { redactUrl: true });
+    });
+
+    const messages = Globals.logBuffer.map(entry => entry.message).join('\n');
+    assert.match(messages, /comments\?\[redacted\]/);
+    assert.doesNotMatch(messages, /temporary-secret/);
+    resetSearchState();
   });
 
   await t.test('GET / should return welcome message', async () => {
@@ -438,6 +548,7 @@ test('worker.js API endpoints', async (t) => {
       const originalGetComments = TencentSource.prototype.getComments;
       const originalAiAsk = AIClient.prototype.ask;
       const originalOrder = Globals.envs.sourceOrderArr;
+      const originalFallbackOrder = Globals.envs.sourceFallbackOrderArr;
       const originalAiValid = Globals.aiValid;
       let searchKeywords = [];
       let aiMatchInput = null;
@@ -480,10 +591,12 @@ test('worker.js API endpoints', async (t) => {
       };
       TencentSource.prototype.getComments = async () => [{ p: '1,1,16777215,test', m: 'mapping-test' }];
       Globals.envs.sourceOrderArr = ['tencent'];
+      Globals.envs.sourceFallbackOrderArr = [];
 
       const runMatch = async (env, fileName, useAi = false) => {
         resetFavoriteState(env);
         Globals.envs.sourceOrderArr = ['tencent'];
+        Globals.envs.sourceFallbackOrderArr = [];
         Globals.aiValid = useAi;
         const request = new Request('http://localhost/api/v2/match', {
           method: 'POST',
@@ -620,6 +733,7 @@ test('worker.js API endpoints', async (t) => {
         TencentSource.prototype.getComments = originalGetComments;
         AIClient.prototype.ask = originalAiAsk;
         Globals.envs.sourceOrderArr = originalOrder;
+        Globals.envs.sourceFallbackOrderArr = originalFallbackOrder;
         Globals.aiValid = originalAiValid;
       }
     });
