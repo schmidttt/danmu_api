@@ -44,6 +44,7 @@ import { addAnime, addEpisode, getCommentCache, getSearchCache, hasSeasonSpecifi
 import { addFavorite, listFavorites, loadFavorites, removeFavorite, resolveFavoriteForKeyword, saveFavorites } from './utils/favorite-util.js';
 import { candidateMatchesMappingQualifiers, candidateMatchesMappingTitle, parseAutoMatchMappingRules, resolveAutoMatchMapping } from './utils/auto-match-mapping-util.js';
 import { HTML_TEMPLATE } from './ui/template.js';
+import { mainJsContent } from './ui/js/main.js';
 import { apitestJsContent } from './ui/js/apitest.js';
 import { systemSettingsJsContent } from './ui/js/systemsettings.js';
 import { previewJsContent } from './ui/js/preview.js';
@@ -1184,7 +1185,7 @@ test('worker.js API endpoints', async (t) => {
       }
     });
 
-    await t.test('frontend bundle contains working favorite controls', () => {
+    await t.test('frontend bundle contains working favorite controls', async () => {
       assert.match(HTML_TEMPLATE, /id="manual-favorite-btn"/);
       assert.doesNotMatch(HTML_TEMPLATE, /id="auto-favorite-btn"/);
       assert.match(HTML_TEMPLATE, /id="favorite-panel"/);
@@ -1197,14 +1198,82 @@ test('worker.js API endpoints', async (t) => {
       assert.match(apitestJsContent, /\/api\/v2\/favorite\/refresh/);
       assert.match(apitestJsContent, /\/api\/v2\/favorite\/remove/);
       assert.match(apitestJsContent, /最近刷新时间：/);
+      assert.match(mainJsContent, /let copyableApiEndpoint = ''/);
+      assert.ok(mainJsContent.includes("copyableApiEndpoint = /^\\*+$/.test(apiToken) ? '' : apiEndpoint;"));
+      assert.match(mainJsContent, /if \(!copyableApiEndpoint\)/);
+      assert.match(mainJsContent, /无法复制脱敏地址/);
+      assert.match(mainJsContent, /请勿使用 ADMIN_TOKEN 作为播放器地址/);
+      assert.doesNotMatch(mainJsContent, /API端点已复制到剪贴板:.*apiEndpoint/);
       assert.doesNotMatch(systemSettingsJsContent, /switchCategory\('favorite'\)/);
       assert.match(systemSettingsJsContent, /const isMergeSourcePairs = currentKey === 'MERGE_SOURCE_PAIRS'/);
       assert.match(systemSettingsJsContent, /preventDuplicateSources && selectedSourceTokens\.has\(value\)/);
       assert.match(systemSettingsJsContent, /String\(element\.dataset\.value \|\| ''\)\.split\('&'\)/);
       assert.doesNotThrow(() => new Function(apitestJsContent));
+      assert.doesNotThrow(() => new Function(mainJsContent));
       assert.doesNotThrow(() => new Function(systemSettingsJsContent));
       assert.doesNotThrow(() => new Function(previewJsContent));
       assert.match(previewJsContent, /AUTO_MATCH_MAPPING_TABLE/);
+
+      const copyFunctionStart = mainJsContent.indexOf('function copyApiEndpoint()');
+      const copyFunctionEnd = mainJsContent.indexOf('function fallbackCopy', copyFunctionStart);
+      assert.ok(copyFunctionStart >= 0 && copyFunctionEnd > copyFunctionStart);
+      const copyFunctionSource = mainJsContent.slice(copyFunctionStart, copyFunctionEnd);
+
+      const runCopyEndpoint = async (displayedEndpoint, copyableEndpoint) => {
+        const copied = [];
+        const alerts = [];
+        const logs = [];
+        const endpointElement = {
+          textContent: displayedEndpoint,
+          style: {}
+        };
+        const documentStub = {
+          getElementById: id => id === 'api-endpoint' ? endpointElement : null
+        };
+        const navigatorStub = {
+          clipboard: {
+            writeText: async value => {
+              copied.push(value);
+            }
+          }
+        };
+        const executeCopy = new Function(
+          'document',
+          'navigator',
+          'customAlert',
+          'addLog',
+          'fallbackCopy',
+          'setTimeout',
+          `let copyableApiEndpoint = ${JSON.stringify(copyableEndpoint)};\n${copyFunctionSource}\ncopyApiEndpoint();`
+        );
+        executeCopy(
+          documentStub,
+          navigatorStub,
+          (message, title) => alerts.push({ message, title }),
+          (message, level) => logs.push({ message, level }),
+          () => { throw new Error('clipboard fallback should not run'); },
+          () => {}
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+        return { copied, alerts, logs };
+      };
+
+      const maskedCopy = await runCopyEndpoint('https://danmu.example/********', '');
+      assert.deepEqual(maskedCopy.copied, []);
+      assert.equal(maskedCopy.alerts.length, 1);
+      assert.equal(maskedCopy.alerts[0].title, '无法复制脱敏地址');
+      assert.match(maskedCopy.alerts[0].message, /https:\/\/danmu\.example\/\{TOKEN\}/);
+      assert.match(maskedCopy.alerts[0].message, /ADMIN_TOKEN/);
+
+      const authorizedUrl = 'https://danmu.example/browser-test-token';
+      const authorizedCopy = await runCopyEndpoint(authorizedUrl, authorizedUrl);
+      assert.deepEqual(authorizedCopy.copied, [authorizedUrl]);
+      assert.deepEqual(authorizedCopy.alerts, []);
+      assert.deepEqual(authorizedCopy.logs, [
+        { message: 'API端点已复制到剪贴板', level: 'success' }
+      ]);
+      assert.doesNotMatch(JSON.stringify(authorizedCopy.logs), /browser-test-token/);
     });
 
   await t.test('handleClearCache clears only the selected cache items', async t => {

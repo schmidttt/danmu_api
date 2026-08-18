@@ -119,6 +119,7 @@ let latestVersion = '';
 let currentToken = 'globals.currentToken';
 let currentAdminToken = ''; // admin token，用于系统管理
 let originalToken = '';
+let copyableApiEndpoint = ''; // 仅在当前访问已获授权且拿到真实 TOKEN 时赋值
 
 // 反向代理/API基础路径配置
 // 从LocalStorage获取用户自定义的Base URL
@@ -241,6 +242,8 @@ function loadEnvVariables() {
 
 // 更新API端点信息
 function updateApiEndpoint() {
+  // 每次刷新配置前先清空，避免请求失败后沿用旧的敏感地址。
+  copyableApiEndpoint = '';
   return fetch(buildApiUrl('/api/config', true))
     .then(response => {
         // 检查ContentType，如果是HTML说明可能是404页面或反代错误页面
@@ -311,6 +314,8 @@ function updateApiEndpoint() {
           cleanBaseUrl = cleanBaseUrl.slice(0, -1);
       }
       const apiEndpoint = cleanBaseUrl + '/' + apiToken;
+      // 脱敏地址只能展示，绝不能作为播放器配置复制出去。
+      copyableApiEndpoint = /^\\*+$/.test(apiToken) ? '' : apiEndpoint;
       
       const apiEndpointElement = document.getElementById('api-endpoint');
       if (apiEndpointElement) {
@@ -320,6 +325,7 @@ function updateApiEndpoint() {
     })
     .catch(error => {
       console.error('获取配置信息失败:', error);
+      copyableApiEndpoint = '';
       // 出错时显示默认值
       const protocol = window.location.protocol;
       const host = window.location.host;
@@ -611,8 +617,21 @@ async function init() {
 function copyApiEndpoint() {
     var apiEndpointElement = document.getElementById('api-endpoint');
     if (!apiEndpointElement) return;
-    var apiEndpoint = apiEndpointElement.textContent.trim();
-    if (!apiEndpoint || apiEndpoint === '加载中...') return;
+    var displayedEndpoint = apiEndpointElement.textContent.trim();
+    if (!displayedEndpoint || displayedEndpoint === '加载中...') return;
+
+    if (!copyableApiEndpoint) {
+        var endpointTemplate = displayedEndpoint.replace(/\\/\\*+$/, '/{TOKEN}');
+        customAlert(
+            '当前页面显示的是脱敏地址，不能直接作为播放器配置。\\n\\n' +
+            '请使用包含 TOKEN 的地址访问本页面，或到 Vercel 环境变量中复制 TOKEN 后组成完整地址：\\n' +
+            endpointTemplate + '\\n\\n请勿使用 ADMIN_TOKEN 作为播放器地址。',
+            '无法复制脱敏地址'
+        );
+        return;
+    }
+
+    var apiEndpoint = copyableApiEndpoint;
 
     var done = function() {
         var originalText = apiEndpointElement.textContent;
@@ -622,7 +641,8 @@ function copyApiEndpoint() {
             apiEndpointElement.textContent = originalText;
             apiEndpointElement.style.color = '#4CAF50';
         }, 2000);
-        addLog('API端点已复制到剪贴板: ' + apiEndpoint, 'success');
+        // 不在界面日志中记录完整 TOKEN。
+        addLog('API端点已复制到剪贴板', 'success');
     };
 
     // 主方案：Clipboard API (需 HTTPS)
