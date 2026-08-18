@@ -456,8 +456,9 @@ API 支持返回 Bilibili 标准 XML 格式的弹幕数据，通过查询参数 
 | VOD_REQUEST_TIMEOUT      | 【可选】VOD服务器单个请求超时时间（毫秒），防止慢速或失效的采集站阻塞搜索，默认为`10000`（10秒），建议值：`5000-15000`。由于`fastest`模式只返回最快响应的站点，可以设置较大的超时时间给慢速站点更多机会       |
 | BILIBILI_COOKIE      | 【可选】b站cookie（填入后能抓取完整弹幕和启用港澳台App接口），如 `buvid3=E2BCA ... eao6; theme-avatar-tip-show=SHOWED`，请自行通过浏览器或抓包工具抓取，热心网友测试后，弹幕获取实际最少只需取 `SESSDATA=xxxx` 字段，但如果需要使用港澳台区域稳定的App搜索接口还需要`bili_jct=xxxx`或`access_key=xxxx` 字段，不知道怎么获取cookie的，可以从工具 [cookie-butler](https://cookie-butler.do-u.me) 获取    |
 | DOUBAN_COOKIE      | 【可选】豆瓣cookie，用于豆瓣相关接口请求，配置后可降低豆瓣接口风控影响，提升搜索/详情获取的稳定性。填写浏览器中已登录豆瓣后的完整 Cookie 字符串即可，格式示例：`bid=xxxx; ll="118282"; ...`。如遇到豆瓣搜索不稳定、返回异常或频繁验证，建议优先补充该变量       |
-| YOUKU_CONCURRENCY    | 【可选】youku弹幕请求并发数，用于加快youku弹幕请求速度，不填默认为`8`，最高`16`       |
-| SOURCE_ORDER    | 【可选】源排序，用于按源对返回资源的排序（注意：先后顺序会影响自动匹配最终的返回），默认是`douban,360,renren,hanjutv`，表示douban数据排在最前，hanjutv数据排在最后，示例：`douban,renren`：只返回douban数据和renren数据，且douban数据靠前；当前可选择的源字段有 `360,vod,tmdb,douban,tencent,youku,iqiyi,imgo,bilibili,migu,sohu,leshi,xigua,maiduidui,aiyifan,hongguo,renren,hanjutv,dandan,bahamut,animeko,custom`       |
+| YOUKU_CONCURRENCY    | 【可选】youku弹幕请求并发数，用于加快youku弹幕请求速度，不填默认为`16`，最高`16`       |
+| SOURCE_ORDER    | 【可选】主搜索源排序，用于按源对返回资源排序（注意：先后顺序会影响自动匹配最终返回），默认是`tencent,iqiyi,youku,imgo,bilibili,migu`；当前可选择的源字段有 `360,vod,tmdb,douban,tencent,youku,iqiyi,imgo,bilibili,migu,sohu,leshi,xigua,maiduidui,aiyifan,hongguo,renren,hanjutv,dandan,bahamut,animeko,custom`       |
+| SOURCE_FALLBACK_ORDER | 【可选】当`SOURCE_ORDER`全部无结果时启用的搜索兜底顺序，默认`tencent,iqiyi,youku,imgo,bilibili,migu,360,douban,renren,hanjutv`；已在主顺序执行过的源会自动跳过，兼容旧部署配置；设为`none`可关闭兜底       |
 | PLATFORM_ORDER    | 【可选】自动匹配优选平台，按顺序优先返回指定平台弹幕，默认为空，即返回第一个满足条件的平台，示例：`bilibili1,qq`，表示如果有b站的播放源，则优先返回b站的弹幕，否则就返回腾讯的弹幕，两者都没有，则返回第一个满足条件的平台，当配置合并平台的时候为指定期望的合并源；当前可选择的平台字段有 `qiyi, bilibili1, imgo, youku, qq, migu, sohu, leshi, xigua, maiduidui, aiyifan, hongguo, renren, hanjutv, dandan, bahamut, animeko, custom`  |
 | MERGE_SOURCE_PAIRS    | 【可选】源合并配置，配置后将对应源合并同时一起获取弹幕返回，默认为空，格式是`源字段&源字段&源字段`，示例：`dandan&bahamut&animeko,renren&hanjutv,renren`， 允许多组、允许同时存在、允许多源，允许填单源表示保留原结果，一组中第一个为主源其余为副源，副源往主源合并，主源如果没有结果会轮替下一个作为主源循环，目前允许合并的源字段有`tencent,youku,iqiyi,imgo,bilibili,migu,sohu,leshi,xigua,maiduidui,aiyifan,hongguo,renren,hanjutv,dandan,bahamut,animeko` |
 | CUSTOM_MERGE_RULES | 【可选】合并映射表，用于自定义源合并行为，默认为空。<br>格式 1 (合并)：`副源剧名/S季数@来源 -> 主源剧名/S季数@来源 \| E副源集数>E主源集数`<br>格式 2 (阻断)：`副源剧名/S季数@来源 × 主源剧名/S季数@来源`<br>说明：`[/S季数]` 与 `[\|路由规则]` 为可选项，留空则交由程序判断。多个规则用分号隔开，多段路由用逗号分隔。<br>示例：<br>1. 常规合并：`天气之子@bilibili -> 天气之子@dandan`<br>2. 多集路由：`我推的孩子/S01@bahamut -> 我推的孩子/S03@dandan \| E25~E35>E25~E35`<br>3. 阻断合并：`辉夜大小姐想让我告白？～天才们的恋爱头脑战～(2020)@bilibili × 辉夜大小姐想让我告白～天才们的恋爱头脑战～ OVA(2021)【OVA】@dandan` |
@@ -488,7 +489,7 @@ API 支持返回 Bilibili 标准 XML 格式的弹幕数据，通过查询参数 
 | LOG_LEVEL    | 【可选】日志级别，默认为`info`，可选值：`error`（仅错误）、`warn`（错误和警告）、`info`（所有日志），生产环境建议使用`warn`，调试时使用`info`       |
 | SEARCH_CACHE_MINUTES    | 【可选】搜索结果缓存时间（分钟），默认为`3`，避免短期内重复的不必要API请求，同时保证获取最新的结果列表，可根据需要调整：Vercel/Cloudflare建议`1-5`分钟，Docker可设置`5-30`分钟，设置为`0`表示不缓存       |
 | COMMENT_CACHE_MINUTES    | 【可选】弹幕缓存时间（分钟），默认为`3`，弹幕数据的缓存时间，独立于搜索结果缓存，设置为`0`表示不缓存       |
-| COMMENT_CACHE_MIN_COUNT    | 【可选】弹幕缓存最少条数，默认为`100`。缓存弹幕少于该数量时忽略缓存时间并重新获取最新弹幕，设置为`0`可关闭此机制       |
+| COMMENT_CACHE_MIN_COUNT    | 【可选】弹幕缓存最少条数，默认为`1`。任何非空弹幕结果都会在TTL内复用，避免小众内容反复请求上游；如需强制刷新低弹幕量结果可调高，设置为`0`可关闭数量检查       |
 | HONGGUO_MERGE_ALL_EPISODES | 【可选】红果短剧是否将所有集弹幕按集号合并为一集返回，默认为`false`。启用后每集弹幕时间会累加前面各集时长，并在剧集列表中显示为“全集”       |
 | REMEMBER_LAST_SELECT    | 【可选】是否记住明确手动选择的结果，用于match自动匹配时优选上次的选择，默认为`true`。自动匹配后直接获取其返回结果不会写入偏好，选择不同结果时才会记录；如不需要，请关闭       |
 | MAX_LAST_SELECT_MAP    | 【可选】最后选择映射缓存大小限制，默认为`100`，lastSelectMap最多保存的条目数，超过限制时删除最早的条目（FIFO），用于存储查询关键字上次选择的animeId，最小值100，最大值1000       |
@@ -809,4 +810,3 @@ API 支持返回 Bilibili 标准 XML 格式的弹幕数据，通过查询参数 
 ### 📈项目 Star 数增长趋势
 #### Star History
 [![Star History Chart](https://api.star-history.com/svg?repos=huangxd-/danmu_api&type=Date)](https://www.star-history.com/#huangxd-/danmu_api&Date)
-
