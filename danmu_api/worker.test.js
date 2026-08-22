@@ -5,8 +5,9 @@ dotenv.config();
 import test from 'node:test';
 import assert from 'node:assert';
 import { handleRequest } from './worker.js';
-import { extractTitleSeasonEpisode, getBangumi, getComment, getCommentByUrl, matchAnime, searchAnime, buildSearchAnimeUrl, filterSameEpisodeTitle, findEpisodeByNumber, resolveSearchFallbackSources } from "./apis/dandan-api.js";
-import { handleFavoriteRefresh } from './apis/favorite-api.js';
+import { extractTitleSeasonEpisode, getBangumi, getComment, getCommentByUrl, matchAnime, searchAnime, buildSearchAnimeUrl, filterSameEpisodeTitle, findEpisodeByNumber, resolveSearchFallbackSources, resolveSourceAndRealId } from "./apis/dandan-api.js";
+import { stripLinkOffset, applyOffset } from "./utils/offset-util.js";
+import { handleFavoriteAdd, handleFavoriteList, handleFavoriteRefresh, handleFavoriteRemove } from './apis/favorite-api.js';
 import { handleClearCache } from './apis/system-api.js';
 import { httpPost } from './utils/http-util.js';
 import { getRedisCaches, getRedisKey, pingRedis, setRedisKey, setRedisKeyWithExpiry, updateRedisCaches } from "./utils/redis-util.js";
@@ -29,7 +30,7 @@ import LeshiSource from "./sources/leshi.js";
 import XiguaSource from "./sources/xigua.js";
 import MaiduiduiSource from "./sources/maiduidui.js";
 import AiyifanSource from "./sources/aiyifan.js";
-import HongguoSource, { parseHongguoPlayerUrl } from "./sources/hongguo.js";
+import HongguoSource, { HONGGUO_WEB_TIMEOUT_MS, parseHongguoPlayerUrl, parseWebSearchResults, parseWebSeriesDetail } from "./sources/hongguo.js";
 import AnimekoSource from "./sources/animeko.js";
 import OtherSource from "./sources/other.js";
 import { NodeHandler } from "./configs/handlers/node-handler.js";
@@ -49,9 +50,9 @@ import { apitestJsContent } from './ui/js/apitest.js';
 import { systemSettingsJsContent } from './ui/js/systemsettings.js';
 import { previewJsContent } from './ui/js/preview.js';
 import { convertToAsciiSum } from "./utils/codec-util.js";
-import { convertToDanmakuJson, handleDanmusLike } from "./utils/danmu-util.js";
+import { convertToDanmakuJson, handleDanmusLike, splitBlockedWords, parseBlockedWord } from "./utils/danmu-util.js";
 import { Segment, SegmentListResponse } from "./models/dandan-model.js"
-import { initBangumiData, searchBangumiData, clearBangumiDataCache } from "./utils/bangumi-data-util.js";
+import { initBangumiData, searchBangumiData, clearBangumiDataCache, dedupeBangumiSearchResults } from "./utils/bangumi-data-util.js";
 import { generateNipaplaySignature, parseNipaplayRelatedLinks, resolveNipaplayLink, applyShiftToDanmu } from "./utils/nipaplay-util.js";
 
 // Mock Request class for testing
@@ -84,6 +85,16 @@ function mockJsonResponse(data, url) {
   };
 }
 
+function mockHtmlResponse(html, url) {
+  return {
+    ok: true,
+    status: 200,
+    url,
+    headers: new Headers({ 'content-type': 'text/html; charset=utf-8' }),
+    text: async () => html,
+  };
+}
+
 async function withMockFetch(mockFetch, run) {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = mockFetch;
@@ -113,6 +124,7 @@ function createSearchResult(anime) {
 
 function resetSearchState() {
   Globals.init({});
+  Globals.aiValid = false;
   Globals.animes = [];
   Globals.episodeIds = [];
   Globals.episodeNum = 10001;
@@ -125,6 +137,7 @@ function resetSearchState() {
 
 function resetFavoriteState(env = {}) {
   Globals.init(env);
+  Globals.deployPlatform = 'node';
   Globals.animes = [];
   Globals.episodeIds = [];
   Globals.episodeNum = 10001;
@@ -134,6 +147,7 @@ function resetFavoriteState(env = {}) {
   Globals.requestHistory = new Map();
   Globals.localCacheValid = false;
   Globals.localCacheInitialized = false;
+  Globals.redisValid = false;
 }
 
 function createFavoriteAnime(title = '收藏测试', episodeCount = 2, id = 910001) {
@@ -224,6 +238,148 @@ test('worker.js API endpoints', async (t) => {
     const defaultConfig = Globals.init({ LOG_LEVEL: 'error' });
     assert.equal(defaultConfig.episodeTitleFilter.test('【bilibili】第282集出场人物表'), true);
     assert.equal(defaultConfig.episodeTitleFilter.test('【bilibili】第282集 完美世界'), false);
+  });
+
+  await t.test('S01E01 prefers a multi-episode series over a same-title movie in normal and AI matching', async () => {
+    const originalSearch = TencentSource.prototype.search;
+    const originalHandleAnimes = TencentSource.prototype.handleAnimes;
+    const originalAiAsk = AIClient.prototype.ask;
+    const movie = createFavoriteAnime('同名作品(2026)【电影】from tencent', 1, 940001);
+    movie.type = '电影';
+    movie.typeDescription = '电影';
+    const series = createFavoriteAnime('同名作品(2026)【电视剧】from tencent', 3, 940002);
+
+    TencentSource.prototype.search = async () => [{}, {}];
+    TencentSource.prototype.handleAnimes = async (_source, _title, results, details) => {
+      results.push(movie, series);
+      details.set(String(movie.animeId), movie);
+      details.set(String(series.animeId), series);
+    };
+    AIClient.prototype.ask = async () => JSON.stringify({ animeIndex: 0 });
+
+    const runMatch = async (aiEnabled) => {
+      resetSearchState();
+      Globals.init({ SOURCE_ORDER: 'tencent', LOG_LEVEL: 'error' });
+      Globals.aiValid = aiEnabled;
+      Globals.envs.aiMatchPrompt = aiEnabled ? '选择最匹配的候选' : '';
+      const request = new Request('http://localhost/api/v2/match', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fileName: '同名作品 S01E01' })
+      });
+      return parseResponse(await matchAnime(new URL(request.url), request, '127.0.0.1'));
+    };
+
+    try {
+      const normalBody = await runMatch(false);
+      assert.equal(normalBody.matches[0].animeId, series.animeId);
+      assert.equal(normalBody.matches[0].episodeId, series.links[0].id);
+
+      const aiBody = await runMatch(true);
+      assert.equal(aiBody.matches[0].animeId, series.animeId);
+      assert.equal(aiBody.matches[0].episodeId, series.links[0].id);
+    } finally {
+      TencentSource.prototype.search = originalSearch;
+      TencentSource.prototype.handleAnimes = originalHandleAnimes;
+      AIClient.prototype.ask = originalAiAsk;
+      resetSearchState();
+    }
+  });
+
+  await t.test('unrelated multi-episode results do not suppress the correct single-episode match', async () => {
+    const originalSearch = TencentSource.prototype.search;
+    const originalHandleAnimes = TencentSource.prototype.handleAnimes;
+    const originalAiAsk = AIClient.prototype.ask;
+    const single = createFavoriteAnime('正确单集作品(2026)【电影】from tencent', 1, 940005);
+    single.type = '电影';
+    single.typeDescription = '电影';
+    const unrelatedSeries = createFavoriteAnime('无关连续剧(2026)【电视剧】from tencent', 3, 940006);
+
+    TencentSource.prototype.search = async () => [{}, {}];
+    TencentSource.prototype.handleAnimes = async (_source, _title, results, details) => {
+      results.push(single, unrelatedSeries);
+      details.set(String(single.animeId), single);
+      details.set(String(unrelatedSeries.animeId), unrelatedSeries);
+    };
+    AIClient.prototype.ask = async () => JSON.stringify({ animeIndex: 0 });
+
+    const runMatch = async (aiEnabled) => {
+      resetSearchState();
+      Globals.init({ SOURCE_ORDER: 'tencent', LOG_LEVEL: 'error' });
+      Globals.aiValid = aiEnabled;
+      Globals.envs.aiMatchPrompt = aiEnabled ? '选择最匹配的候选' : '';
+      const request = new Request('http://localhost/api/v2/match', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fileName: '正确单集作品 S01E01' })
+      });
+      return parseResponse(await matchAnime(new URL(request.url), request, '127.0.0.1'));
+    };
+
+    try {
+      assert.equal((await runMatch(false)).matches[0].animeId, single.animeId);
+      assert.equal((await runMatch(true)).matches[0].animeId, single.animeId);
+    } finally {
+      TencentSource.prototype.search = originalSearch;
+      TencentSource.prototype.handleAnimes = originalHandleAnimes;
+      AIClient.prototype.ask = originalAiAsk;
+      resetSearchState();
+    }
+  });
+
+  await t.test('source-prefixed IDs and link offsets are normalized before source requests', async () => {
+    assert.deepEqual(
+      resolveSourceAndRealId('https://bangumi.pro/ep/123@%50'),
+      { source: 'animeko', realId: '123@%50' }
+    );
+    assert.deepEqual(
+      resolveSourceAndRealId('https://ani.gamer.com.tw/animeVideo.php?sn=50709@-5'),
+      { source: 'bahamut', realId: '50709@-5' }
+    );
+
+    resetSearchState();
+    Globals.init({ LOG_LEVEL: 'error', COMMENT_CACHE_MIN_COUNT: '1' });
+    const originalBahamutGetComments = BahamutSource.prototype.getComments;
+    const originalHongguoGetComments = HongguoSource.prototype.getComments;
+    let requestedId = null;
+    let requestedHongguoId = null;
+    BahamutSource.prototype.getComments = async id => {
+      requestedId = id;
+      return [{ p: '1,1,16777215,bahamut', m: 'prefix test' }];
+    };
+    HongguoSource.prototype.getComments = async id => {
+      requestedHongguoId = id;
+      return [{ p: '1,1,16777215,hongguo', m: 'structured id test' }];
+    };
+    try {
+      const anime = createFavoriteAnime('前缀测试', 1, 940003);
+      anime.source = 'bahamut';
+      anime.links[0].url = 'bahamut:50709';
+      anime.links[0].title = '【bahamut】 第1集';
+      addAnime(anime);
+      const commentId = Globals.episodeIds.at(-1).id;
+      const response = await getComment(`/api/v2/comment/${commentId}`, 'json', false, '127.0.0.1');
+      const body = await parseResponse(response);
+      assert.equal(response.status, 200);
+      assert.equal(body.count, 1);
+      assert.equal(requestedId, '50709');
+
+      const hongguoAnime = createFavoriteAnime('红果结构化 ID 测试', 1, 940004);
+      hongguoAnime.source = 'hongguo';
+      hongguoAnime.links[0].url = 'hongguo:v1:series-1:vid-1:60';
+      hongguoAnime.links[0].title = '【hongguo】 第1集';
+      addAnime(hongguoAnime);
+      const hongguoCommentId = Globals.episodeIds.at(-1).id;
+      const hongguoResponse = await getComment(`/api/v2/comment/${hongguoCommentId}`, 'json', false, '127.0.0.1');
+      const hongguoBody = await parseResponse(hongguoResponse);
+      assert.equal(hongguoResponse.status, 200);
+      assert.equal(hongguoBody.count, 1);
+      assert.equal(requestedHongguoId, 'hongguo:v1:series-1:vid-1:60');
+    } finally {
+      BahamutSource.prototype.getComments = originalBahamutGetComments;
+      HongguoSource.prototype.getComments = originalHongguoGetComments;
+      resetSearchState();
+    }
   });
 
   await t.test('reliability defaults use mainstream sources, preserve fallback order, and cache small results', () => {
@@ -407,6 +563,120 @@ test('worker.js API endpoints', async (t) => {
     });
 
     assert.equal(seenRedirectMode, 'manual');
+  });
+
+  await t.test('Hongguo keeps complete app details and uses a bounded web fallback', async () => {
+    assert.equal(HONGGUO_WEB_TIMEOUT_MS, 5000);
+    const searchItems = [{
+      keyword: 'series-1',
+      video_data: {
+        series_id: 'series-1',
+        series_name: '网页短剧「测试」',
+        episode_cnt: 2,
+        create_time: 1767225600,
+        series_cover: { url_list: ['https://example.com/cover.jpg'] }
+      }
+    }];
+    const searchHtml = `<script>window.__DATA__={"searchList":${JSON.stringify(searchItems)},"tail":"[]"}</script>`;
+    const detailData = {
+      vid_list: ['vid-1', 'vid-2'],
+      create_time: 1767225600,
+      series_cover: { url_list: ['https://example.com/detail.jpg'] }
+    };
+    const detailHtml = `<script>window.__DATA__={"seriesDetail":${JSON.stringify(detailData)},"tail":"{}"}</script>`;
+    assert.equal(parseWebSearchResults(searchHtml)[0].video_data.series_id, 'series-1');
+    assert.deepEqual(parseWebSeriesDetail(detailHtml).vid_list, ['vid-1', 'vid-2']);
+
+    const webSource = new HongguoSource();
+    webSource.request = async () => { throw new Error('web search should avoid app fallback'); };
+    const webResults = await withMockFetch(
+      url => Promise.resolve(mockHtmlResponse(searchHtml, url)),
+      () => webSource.search('网页短剧')
+    );
+    assert.equal(webResults.length, 1);
+    assert.equal(webResults[0].seriesId, 'series-1');
+
+    const apiSource = new HongguoSource();
+    apiSource.request = async () => ({
+      data: {
+        'series-1': {
+          video_data: {
+            create_time: 1767225600,
+            video_list: [
+              { vid_index: 1, vid: 'vid-1', duration: 95, episode_title: '第一集' },
+              { vid_index: 2, vid: 'vid-2', duration: 88, episode_title: '第二集' }
+            ]
+          }
+        }
+      }
+    });
+    const apiDetails = await apiSource.getEpisodes('series-1');
+    assert.deepEqual(apiDetails.episodes.map(item => item.duration), [95, 88]);
+
+    const fallbackSource = new HongguoSource();
+    fallbackSource.request = async () => { throw new Error('app detail unavailable'); };
+    const fallbackDetails = await withMockFetch(
+      url => Promise.resolve(mockHtmlResponse(detailHtml, url)),
+      () => fallbackSource.getEpisodes('series-1')
+    );
+    assert.deepEqual(fallbackDetails.episodes.map(item => item.vid), ['vid-1', 'vid-2']);
+
+    let windowCalls = 0;
+    fallbackSource.fetchCommentWindow = async (_info, startMs) => {
+      windowCalls++;
+      return {
+        comments: [{ commentId: `c-${windowCalls}`, offsetMs: startMs + 1000, text: `弹幕${windowCalls}`, diggCount: 0 }],
+        nextStart: startMs + 30000,
+        cursor: String(windowCalls),
+        hasMore: windowCalls < 2
+      };
+    };
+    const unknownDurationComments = await fallbackSource.getDanmuForEpisode({ seriesId: 'series-1', vid: 'vid-1', duration: 0 });
+    assert.equal(windowCalls, 2);
+    assert.equal(unknownDurationComments.length, 2);
+
+    const mergeSource = new HongguoSource();
+    mergeSource.getEpisodes = async () => ({
+      episodes: [
+        { vid: 'vid-1', duration: 0 },
+        { vid: 'vid-2', duration: 0 }
+      ]
+    });
+    mergeSource.fetchDanmuForEpisode = async info => ({
+      comments: [{ commentId: info.vid, offsetMs: 1000, text: info.vid, diggCount: 0 }],
+      durationMs: 30000
+    });
+    const merged = await mergeSource.getSeriesDanmu('series-1');
+    assert.deepEqual(merged.map(item => item.offsetMs), [1000, 31000]);
+  });
+
+  await t.test('direct URL offsets use clean source URLs and return the shifted duration', async () => {
+    resetSearchState();
+    Globals.init({ LOG_LEVEL: 'error', COMMENT_CACHE_MIN_COUNT: '1' });
+    Globals.commentCache = new Map();
+    const originalTencentGetComments = TencentSource.prototype.getComments;
+    const requestedUrls = [];
+    TencentSource.prototype.getComments = async (url, _platform, segmentFlag) => {
+      requestedUrls.push(url);
+      if (segmentFlag) return { duration: 20, segmentList: [] };
+      return [
+        { p: '10,1,16777215,qq', m: 'offset-1' },
+        { p: '20,1,16777215,qq', m: 'offset-2' }
+      ];
+    };
+    try {
+      const response = await getCommentByUrl('https://v.qq.com/x/cover/test/ep1.html@5', 'json', false, true);
+      const body = await parseResponse(response);
+      assert.equal(body.videoDuration, 25);
+      assert.deepEqual(body.comments.map(item => item.p), [
+        '15.00,1,16777215,qq',
+        '25.00,1,16777215,qq'
+      ]);
+      assert.ok(requestedUrls.every(url => url === 'https://v.qq.com/x/cover/test/ep1.html'));
+    } finally {
+      TencentSource.prototype.getComments = originalTencentGetComments;
+      resetSearchState();
+    }
   });
 
   await t.test('buildSearchAnimeUrl should preserve special characters in keyword', async () => {
@@ -786,6 +1056,49 @@ test('worker.js API endpoints', async (t) => {
     resetSearchState();
   });
 
+  await t.test('BLOCKED_WORDS 屏蔽词解析与过滤', async () => {
+    const baseEnv = {
+      GROUP_MINUTE: '0',
+      DANMU_LIMIT: '0',
+      CONVERT_COLOR: 'default'
+    };
+    const sample = [
+      { timepoint: '1.00', ct: 1, color: 16777215, content: '前方剧透警告' },
+      { timepoint: '2.00', ct: 1, color: 16777215, content: '测试弹幕一' },
+      { timepoint: '3.00', ct: 1, color: 16777215, content: 'AD广告内容' },
+      { timepoint: '4.00', ct: 1, color: 16777215, content: '正常弹幕' },
+    ];
+
+    const filterWith = async (blockedWords, expectGone, expectKeep = ['正常弹幕']) => {
+      Globals.init({ ...baseEnv, BLOCKED_WORDS: blockedWords });
+      const out = await convertToDanmakuJson(structuredClone(sample), 'test');
+      const texts = out.map(d => d.m);
+      for (const word of expectGone) {
+        assert.ok(!texts.some(t => t.includes(word)), `「${word}」应被屏蔽，实际剩余: ${JSON.stringify(texts)}`);
+      }
+      for (const word of expectKeep) {
+        assert.ok(texts.some(t => t.includes(word)), `「${word}」不应被误屏蔽，实际剩余: ${JSON.stringify(texts)}`);
+      }
+    };
+
+    // 标准正则 / 纯文本词 / 全角逗号 / 正则带 i 标志 / 逗号带空格 / 混合写法
+    await filterWith('/剧透/,/广告/', ['剧透', '广告']);
+    await filterWith('剧透,广告', ['剧透', '广告']);
+    await filterWith('/剧透/，/广告/', ['剧透', '广告']);
+    await filterWith('/ad/i,/^测试/', ['AD广告', '测试']);
+    await filterWith('/剧透/, /广告/', ['剧透', '广告']);
+    await filterWith('/^测试/, 剧透 ，/广告/', ['剧透', '广告', '测试']);
+
+    // README 官方示例兼容性：应解析出 16 个正则且不抛错
+    const readmeSample = "/.{20,}/,/^\\d{2,4}[-/.]\\d{1,2}[-/.]\\d{1,2}([日号.]*)?$/,/^(?!哈+$)([a-zA-Z\\u4e00-\\u9fa5])\\1{2,}/,/[0-9]+\\.*[0-9]*\\s*(w|万)+\\s*(\\+|个|人|在看)+/,/^[a-z]{6,}$/,/^(?:qwertyuiop|asdfghjkl|zxcvbnm)$/,/^\\d{5,}$/,/^(\\d)\\1{2,}/,/^\\d{1,4}$/,/(20[0-3][0-9])/,/(0?[1-9]|1[0-2])月/,/\\d{1,2}[.-]\\d{1,2}/,/[@#&$%^*+\\|/\\-_=<>°◆◇■□●○★☆▼▲♥♦♠♣①②③④⑤⑥⑦⑧⑨⑩]/,/[一二三四五六七八九十百\\d]+刷/,/第[一二三四五六七八九十百\\d]+/,/(全体成员|报到|报道|来啦|签到|刷|打卡|我在|来了|考古|爱了|挖坟|留念|你好|回来|哦哦|重温|复习|重刷|再看|在看|前排|沙发|有人看|板凳|末排|我老婆|我老公|撅了|后排|周目|重看|包养|DVD|同上|同样|我也是|俺也|算我|爱豆|我家爱豆|我家哥哥|加我|三连|币|新人|入坑|补剧|冲了|硬了|看完|舔屏|万人|牛逼|煞笔|傻逼|卧槽|tm|啊这|哇哦)/";
+    const segs = splitBlockedWords(readmeSample);
+    assert.equal(segs.length, 16, `README 官方示例应解析出 16 条规则，实际 ${segs.length}`);
+    const regexes = segs.map(parseBlockedWord);
+    assert.ok(regexes.every(r => r instanceof RegExp), '所有词条均应解析为正则');
+
+    resetSearchState();
+  });
+
   await t.test('Upstash Redis persists favorites without storing search or comment caches', async () => {
     resetFavoriteState({
       UPSTASH_REDIS_REST_URL: 'https://redis.example.com',
@@ -985,14 +1298,14 @@ test('worker.js API endpoints', async (t) => {
 
       const defaultTokenResponse = await handleRequest(
         new Request('http://localhost/api/v2/favorite/list'),
-        {}, 'cloudflare', '127.0.0.1', {}
+        {}, 'node', '127.0.0.1', {}
       );
       assert.equal(defaultTokenResponse.status, 200);
 
       const customTokenEnv = { TOKEN: 'favorite-user-token' };
       const publicListResponse = await handleRequest(
         new Request('http://localhost/api/v2/favorite/list'),
-        customTokenEnv, 'cloudflare', '127.0.0.1', {}
+        customTokenEnv, 'node', '127.0.0.1', {}
       );
       assert.equal(publicListResponse.status, 200);
 
@@ -1002,7 +1315,7 @@ test('worker.js API endpoints', async (t) => {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ keyword: '路由收藏测试' })
         }),
-        customTokenEnv, 'cloudflare', '127.0.0.1', {}
+        customTokenEnv, 'node', '127.0.0.1', {}
       );
       assert.equal(unauthorizedResponse.status, 401);
 
@@ -1010,13 +1323,13 @@ test('worker.js API endpoints', async (t) => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ fileName: '路由收藏测试 S01E01' })
-      }), {}, 'cloudflare', '127.0.0.1', {});
+      }), {}, 'node', '127.0.0.1', {});
       assert.equal(addResponse.status, 200);
       assert.equal((await parseResponse(addResponse)).isFavorite, true);
 
       const listResponse = await handleRequest(
         new Request('http://localhost/87654321/api/favorite/list'),
-        {}, 'cloudflare', '127.0.0.1', {}
+        {}, 'node', '127.0.0.1', {}
       );
       const listBody = await parseResponse(listResponse);
       assert.equal(listBody.favorites.length, 1);
@@ -1026,7 +1339,7 @@ test('worker.js API endpoints', async (t) => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ keyword: listBody.favorites[0].keyword })
-      }), {}, 'cloudflare', '127.0.0.1', {});
+      }), {}, 'node', '127.0.0.1', {});
       assert.equal(removeResponse.status, 200);
       assert.equal(Globals.favoriteCache.size, 0);
       assert.equal(Globals.searchCache.has('路由收藏测试_S1'), false);
@@ -1063,6 +1376,34 @@ test('worker.js API endpoints', async (t) => {
       );
       assert.equal(adminResponse.status, 200);
       assert.deepEqual((await parseResponse(adminResponse)).favorites, []);
+    });
+
+    await t.test('serverless favorite writes are rejected when Redis persistence is unavailable', async () => {
+      resetFavoriteState();
+      Globals.deployPlatform = 'vercel';
+      Globals.redisValid = false;
+
+      const listResponse = handleFavoriteList();
+      const listBody = await parseResponse(listResponse);
+      assert.equal(listBody.favoriteSupported, false);
+
+      const makeRequest = body => new Request('http://localhost/api/v2/favorite/action', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const baseUrl = new URL('http://localhost/api/v2/favorite/action');
+      const responses = [
+        await handleFavoriteAdd(makeRequest({ keyword: '不可持久化收藏' }), baseUrl),
+        await handleFavoriteRefresh(makeRequest({ keyword: '不可持久化收藏' }), baseUrl),
+        await handleFavoriteRemove(makeRequest({ keyword: '不可持久化收藏' }))
+      ];
+      for (const response of responses) {
+        assert.equal(response.status, 503);
+        assert.match((await parseResponse(response)).message, /持久化收藏存储/);
+      }
+      assert.equal(Globals.favoriteCache.size, 0);
+      resetFavoriteState();
     });
 
     await t.test('system mutation routes require an explicit ADMIN_TOKEN', async () => {
@@ -1124,7 +1465,7 @@ test('worker.js API endpoints', async (t) => {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ keyword: '火影忍者' })
-      }), {}, 'cloudflare', '127.0.0.1', {});
+      }), {}, 'node', '127.0.0.1', {});
       const addBody = await parseResponse(addResponse);
       assert.equal(addResponse.status, 200);
       assert.equal(addBody.keyword, '火影忍者');
@@ -1133,7 +1474,7 @@ test('worker.js API endpoints', async (t) => {
 
       const listBody = await parseResponse(await handleRequest(
         new Request('http://localhost/api/v2/favorite/list'),
-        {}, 'cloudflare', '127.0.0.1', {}
+        {}, 'node', '127.0.0.1', {}
       ));
       assert.equal(listBody.favorites[0].keyword, '火影忍者');
       assert.equal(listBody.favorites[0].animeTitle, '火影忍者');
@@ -1396,6 +1737,56 @@ test('worker.js API endpoints', async (t) => {
     });
   });
 
+  });
+
+  await t.test('stripLinkOffset 解析 @偏移 后缀（@秒数 / @%百分比 / 无偏移 / 合并链接仅取末段）', async () => {
+    assert.deepEqual(stripLinkOffset('https://x.com/v/1'), { cleanUrl: 'https://x.com/v/1', offset: 0, percent: false });
+    assert.deepEqual(stripLinkOffset('https://x.com/v/1@3197'), { cleanUrl: 'https://x.com/v/1', offset: 3197, percent: false });
+    assert.deepEqual(stripLinkOffset('https://x.com/v/1@%50'), { cleanUrl: 'https://x.com/v/1', offset: 50, percent: true });
+    assert.deepEqual(stripLinkOffset('https://x.com/v/1@-50'), { cleanUrl: 'https://x.com/v/1', offset: -50, percent: false });
+    // 合并链接仅从整条 URL 尾部取末段子链接的 @偏移
+    const merged = 'https://x.com/v/A$$$https://x.com/v/B@3197';
+    assert.deepEqual(stripLinkOffset(merged), { cleanUrl: 'https://x.com/v/A$$$https://x.com/v/B', offset: 3197, percent: false });
+    // 容错：非字符串入参不抛错
+    assert.deepEqual(stripLinkOffset(null), { cleanUrl: '', offset: 0, percent: false });
+  });
+
+  await t.test('applyOffset 应用 @偏移 的端点语义（绝对 = 时间+偏移，百分比端点 = 最大时间+偏移）', async () => {
+    const danmus = [{ p: '10,1,16777215,b' }, { p: '20,1,16777215,b' }];
+    // 绝对偏移：每条弹幕时间整体平移 offset 秒
+    assert.deepEqual(applyOffset(danmus, 50).map(d => d.p), ['60.00,1,16777215,b', '70.00,1,16777215,b']);
+    // 百分比偏移：按时间轴缩放，scaleRatio=(maxTime+offset)/maxTime，端点 maxTime → maxTime+offset
+    assert.deepEqual(applyOffset(danmus, 50, { usePercent: true, videoDuration: 20 }).map(d => d.p), ['35.00,1,16777215,b', '70.00,1,16777215,b']);
+    // 合并时长端点一致性：单链接时长 3266、偏移 3197 时，合并时间轴末端为 6463
+    assert.equal(applyOffset([{ t: 3266 }], 3197, { usePercent: false, videoDuration: 3266 })[0].t, 6463);
+  });
+
+  // 测试 Bangumi Data 本地检索结果的同源去重
+  await t.test('dedupeBangumiSearchResults should dedupe same-source results and skip tmdb', () => {
+    const makeResult = (siteKey, siteId, titles) => ({ matchedSiteKey: siteKey, siteId, titles });
+
+    // 同源多条目：保留标题精确命中检索词的一条，其余标题并入别名
+    const merged = dedupeBangumiSearchResults([
+      makeResult('anidb', '19242', ['Re：从零开始的异世界生活 第四季 丧失篇(2026)']),
+      makeResult('anidb', '19242', ['Re：从零开始的异世界生活 第四季 夺还篇(2026)']),
+    ], 'Re：从零开始的异世界生活 第四季 夺还篇(2026)');
+    assert.equal(merged.length, 1, `Expected merged.length === 1, but got ${merged.length}`);
+    assert.equal(merged[0].titles[0], 'Re：从零开始的异世界生活 第四季 夺还篇(2026)');
+    assert.ok(merged[0].titles.includes('Re：从零开始的异世界生活 第四季 丧失篇(2026)'), 'Expected merged titles to include the secondary title');
+
+    // tmdb 不参与去重，同 id 多条均保留
+    const tmdbOnly = dedupeBangumiSearchResults([
+      makeResult('tmdb', '123', ['标题A']),
+      makeResult('tmdb', '123', ['标题B']),
+    ], '检索词');
+    assert.equal(tmdbOnly.length, 2, `Expected tmdbOnly.length === 2, but got ${tmdbOnly.length}`);
+
+    // 不同源 id 空间重叠（同 siteId 不同 matchedSiteKey）不合并
+    const crossSite = dedupeBangumiSearchResults([
+      makeResult('anidb', '19242', ['丧失篇']),
+      makeResult('bangumi', '19242', ['夺还篇']),
+    ], '检索词');
+    assert.equal(crossSite.length, 2, `Expected crossSite.length === 2, but got ${crossSite.length}`);
   });
 
   // await t.test('GET /api/v2/comment/:id?format=json&duration=true should return segment duration and reuse comment cache', async () => {
