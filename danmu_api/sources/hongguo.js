@@ -69,11 +69,62 @@ const CLIENT_CONFIG = {
   },
 };
 
+const WEB_ORIGIN = "https://hongguoduanju.com";
+export const HONGGUO_WEB_TIMEOUT_MS = 5_000;
+
+export function parseWebSearchResults(html) {
+  const marker = '"searchList":';
+  const start = html.indexOf(marker);
+  if (start < 0) return [];
+  let i = start + marker.length;
+  while (i < html.length && /\s/.test(html[i])) i++;
+  if (html[i] !== "[") return [];
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  let end = i;
+  for (; end < html.length; end++) {
+    const ch = html[end];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') quoted = false;
+      continue;
+    }
+    if (ch === '"') quoted = true;
+    else if (ch === "[") depth++;
+    else if (ch === "]" && --depth === 0) break;
+  }
+  try { return JSON.parse(html.slice(i, end + 1)); } catch { return []; }
+}
+
+export function parseWebSeriesDetail(html) {
+  const marker = '"seriesDetail":';
+  const start = html.indexOf(marker);
+  if (start < 0) return null;
+  let i = start + marker.length;
+  while (i < html.length && /\s/.test(html[i])) i++;
+  if (html[i] !== "{") return null;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  let end = i;
+  for (; end < html.length; end++) {
+    const ch = html[end];
+    if (quoted) { if (escaped) escaped = false; else if (ch === "\\") escaped = true; else if (ch === '"') quoted = false; continue; }
+    if (ch === '"') quoted = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}" && --depth === 0) break;
+  }
+  try { return JSON.parse(html.slice(i, end + 1)); } catch { return null; }
+}
+
 const COMMENT_SOURCE = 601;
 const SERVER_CHANNEL = 1000;
 const COMMENT_WINDOW_MS = 30_000;
 const COMMENT_COUNT = 90;
 const COMMENT_CONCURRENCY = 30;
+const MAX_UNKNOWN_DURATION_WINDOWS = 30;
 const MAX_SEARCH_ITEMS = 20;
 const IMAGE_SHRINK =
   "W3siaW1hZ2VfdHlwZSI6MywiaW1hZ2Vfd2lkdGgiOjkwMCwic2hyaW5rX3R5cGUiOjN9LHsiaW1h\n" +
@@ -756,6 +807,14 @@ export default class HongguoSource extends BaseSource {
 
   async search(keyword) {
     try {
+      const response = await httpGet(`${WEB_ORIGIN}/search/${encodeURIComponent(keyword)}`, { headers: { accept: "text/html" }, timeout: HONGGUO_WEB_TIMEOUT_MS });
+      const items = parseWebSearchResults(typeof response.data === "string" ? response.data : "");
+      if (items.length) return items.map((item) => {
+        const data = item.video_data || {};
+        return { seriesId: String(data.series_id || item.keyword || ""), name: String(data.series_name || data.series_title || item.name || ""), episodeCount: Number(data.episode_cnt) || 0, score: "", year: extractYearFromTimestamp(data.create_time), imageUrl: extractImageUrl(data.series_cover) };
+      }).filter((item) => item.seriesId && item.name && item.episodeCount > 0).slice(0, MAX_SEARCH_ITEMS);
+    } catch (error) { log("warn", `[Hongguo] web search unavailable: ${error.message}`); }
+    try {
       const results = [];
       const seen = new Set();
       let offset = 0;
@@ -798,6 +857,7 @@ export default class HongguoSource extends BaseSource {
   }
 
   async getEpisodes(seriesId) {
+    let apiError = null;
     try {
       const body = {
         biz_param: {
@@ -826,6 +886,7 @@ export default class HongguoSource extends BaseSource {
         commentCount: Math.max(0, Number(item.comment_count) || 0),
         imageUrl: extractImageUrl(item.episode_cover || item.cover),
       })).filter((item) => item.vid).sort((a, b) => a.index - b.index);
+      if (!episodes.length) throw new Error("平台详情未返回剧集");
       return {
         episodes,
         year: extractYearFromTimestamp(videoData.create_time),
@@ -834,7 +895,33 @@ export default class HongguoSource extends BaseSource {
           "",
       };
     } catch (error) {
-      log("error", `[Hongguo] 获取剧集失败: ${error.message}`);
+      apiError = error;
+      log("warn", `[Hongguo] app detail unavailable, trying web fallback: ${error.message}`);
+    }
+
+    try {
+      const response = await httpGet(`${WEB_ORIGIN}/detail?series_id=${encodeURIComponent(seriesId)}`, {
+        headers: { accept: "text/html" },
+        timeout: HONGGUO_WEB_TIMEOUT_MS,
+      });
+      const detail = parseWebSeriesDetail(typeof response.data === "string" ? response.data : "");
+      if (detail && Array.isArray(detail.vid_list) && detail.vid_list.length) {
+        return {
+          episodes: detail.vid_list.map((vid, index) => ({
+            index: index + 1,
+            vid: String(vid),
+            title: `第${index + 1}集`,
+            duration: 0,
+            commentCount: 0,
+            imageUrl: "",
+          })),
+          year: extractYearFromTimestamp(detail.create_time),
+          imageUrl: extractImageUrl(detail.series_cover),
+        };
+      }
+      throw new Error("网页详情未返回剧集");
+    } catch (webError) {
+      log("error", `[Hongguo] 获取剧集失败: app=${apiError?.message || "unknown"}; web=${webError.message}`);
       return { episodes: [], year: null, imageUrl: "" };
     }
   }
@@ -994,42 +1081,52 @@ export default class HongguoSource extends BaseSource {
     };
   }
 
-  async getDanmuForEpisode(info) {
+  async fetchDanmuForEpisode(info) {
     const durationMs = info.duration * 1000;
     const comments = [];
     const seenMarkers = new Set();
     let startMs = 0;
     let cursor = "";
-    const maxRequests = Math.max(1, Math.ceil(durationMs / COMMENT_WINDOW_MS) + 5);
+    let inferredDurationMs = durationMs;
+    const maxRequests = durationMs > 0
+      ? Math.max(1, Math.ceil(durationMs / COMMENT_WINDOW_MS) + 5)
+      : MAX_UNKNOWN_DURATION_WINDOWS;
     for (let requestIndex = 0; requestIndex < maxRequests; requestIndex++) {
       const marker = `${startMs}:${cursor}`;
       if (seenMarkers.has(marker)) break;
       seenMarkers.add(marker);
       const page = await this.fetchCommentWindow(info, startMs, cursor);
       comments.push(...page.comments);
+      inferredDurationMs = Math.max(inferredDurationMs, page.nextStart);
       if (durationMs && page.nextStart >= durationMs) break;
       if (!page.hasMore && !durationMs) break;
       startMs = page.nextStart;
       cursor = page.cursor;
     }
-    return comments;
+    return { comments, durationMs: inferredDurationMs };
+  }
+
+  async getDanmuForEpisode(info) {
+    return (await this.fetchDanmuForEpisode(info)).comments;
   }
 
   async getSeriesDanmu(seriesId) {
     const details = await this.getEpisodes(seriesId);
-    let cumulativeMs = 0;
-    const episodeTasks = details.episodes.map((episode) => {
-      const task = { episode, offsetMs: cumulativeMs };
-      cumulativeMs += Math.max(0, Number(episode.duration) || 0) * 1000;
-      return task;
-    });
-    const groupedComments = await mapWithConcurrency(episodeTasks, COMMENT_CONCURRENCY, async ({ episode, offsetMs }) => {
-      const episodeComments = await this.getDanmuForEpisode({
+    const episodeResults = await mapWithConcurrency(details.episodes, COMMENT_CONCURRENCY, async (episode) => {
+      return this.fetchDanmuForEpisode({
         seriesId: String(seriesId),
         vid: episode.vid,
         duration: episode.duration,
       });
-      return episodeComments.map((comment) => ({
+    });
+    let cumulativeMs = 0;
+    const groupedComments = episodeResults.map((result, index) => {
+      const offsetMs = cumulativeMs;
+      cumulativeMs += Math.max(
+        Math.max(0, Number(details.episodes[index]?.duration) || 0) * 1000,
+        Math.max(0, Number(result.durationMs) || 0),
+      );
+      return result.comments.map((comment) => ({
         ...comment,
         offsetMs: comment.offsetMs + offsetMs,
       }));

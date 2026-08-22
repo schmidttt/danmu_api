@@ -17,6 +17,17 @@ import { createFavoriteSchedule } from '../utils/favorite-schedule-util.js';
 
 const favoriteRefreshLocks = new Set();
 
+export function isFavoriteStorageSupported() {
+  return globals.deployPlatform === 'node' || globals.redisValid === true;
+}
+
+function favoriteStorageUnavailableResponse() {
+  return jsonResponse({
+    success: false,
+    message: '当前部署未配置持久化收藏存储。云平台请配置 UPSTASH_REDIS_REST_URL 和 UPSTASH_REDIS_REST_TOKEN 后重新部署。'
+  }, 503);
+}
+
 async function resolveTitleForFavorite(fileName) {
   const { cleanFileName } = parseFileName(fileName);
   let { title, season, episode, year } = await extractTitleSeasonEpisode(cleanFileName);
@@ -84,6 +95,8 @@ async function findSearchEntry(cacheKey, title, season, episode, url) {
 }
 
 export async function handleFavoriteAdd(req, url) {
+  if (!isFavoriteStorageSupported()) return favoriteStorageUnavailableResponse();
+
   try {
     const body = await req.json();
     const requestedKeyword = String(body?.keyword || '').trim();
@@ -128,8 +141,15 @@ export async function handleFavoriteAdd(req, url) {
 }
 
 export function handleFavoriteList() {
+  // Node/Docker 可以使用本地文件缓存；无持久化存储的 serverless 实例
+  // 会在冷启动或实例切换后丢失收藏，因此不向前端开放收藏写入按钮。
+  const favoriteSupported = isFavoriteStorageSupported();
   return jsonResponse({
     success: true,
+    favoriteSupported,
+    favoriteSupportMessage: favoriteSupported
+      ? ''
+      : '当前云部署未配置 Redis，收藏功能不可用。请配置 UPSTASH_REDIS_REST_URL 和 UPSTASH_REDIS_REST_TOKEN 后重新部署。',
     scheduledRefreshSupported: globals.deployPlatform === 'node',
     favorites: listFavorites()
   });
@@ -170,6 +190,8 @@ export async function handleFavoriteSchedule(req) {
 }
 
 export async function handleFavoriteRemove(req) {
+  if (!isFavoriteStorageSupported()) return favoriteStorageUnavailableResponse();
+
   try {
     const body = await req.json();
     let keyword = String(body?.keyword || body?.title || body?.fileName || '').trim();
@@ -249,6 +271,8 @@ export async function refreshFavoriteByKeyword(keyword, url, { persist = true } 
 }
 
 export async function handleFavoriteRefresh(req, url) {
+  if (!isFavoriteStorageSupported()) return favoriteStorageUnavailableResponse();
+
   try {
     const body = await req.json();
     const fileName = String(body?.fileName || '').trim();
