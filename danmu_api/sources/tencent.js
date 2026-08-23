@@ -8,6 +8,67 @@ import { addAnime, removeEarliestAnime } from "../utils/cache-util.js";
 import { printFirst200Chars, titleMatches, getExplicitSeasonNumber, extractSeasonNumberFromAnimeTitle } from "../utils/common-util.js";
 import { SegmentListResponse } from '../models/dandan-model.js';
 
+export const DEFAULT_TENCENT_DANMU_DEADLINE_MS = 8000;
+
+const TENCENT_REQUEST_HEADERS = {
+  "Content-Type": "application/json",
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+};
+
+/**
+ * 并发获取腾讯弹幕分片，并在整体截止时间到达后返回已经成功的结果。
+ * 单个慢分片不应拖住整集弹幕；未完成请求会通过 AbortSignal 主动取消。
+ */
+export async function fetchTencentDanmuSegments(segmentList, {
+  request = httpGet,
+  deadlineMs = DEFAULT_TENCENT_DANMU_DEADLINE_MS,
+} = {}) {
+  const effectiveDeadlineMs = Number.isFinite(Number(deadlineMs)) && Number(deadlineMs) > 0
+    ? Number(deadlineMs)
+    : DEFAULT_TENCENT_DANMU_DEADLINE_MS;
+  const controller = new AbortController();
+  const settledResults = new Array(segmentList.length);
+  let timedOut = false;
+  let timeoutId;
+
+  const requests = segmentList.map((segment, index) => Promise.resolve()
+    .then(() => request(segment.url, {
+      headers: TENCENT_REQUEST_HEADERS,
+      retries: 1,
+      timeout: effectiveDeadlineMs,
+      signal: controller.signal,
+    }))
+    .then(
+      value => ({ status: "fulfilled", value }),
+      reason => ({ status: "rejected", reason })
+    )
+    .then(result => {
+      settledResults[index] = result;
+      return result;
+    }));
+
+  const allSettled = Promise.all(requests);
+  const deadlineReached = new Promise(resolve => {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      resolve();
+    }, effectiveDeadlineMs);
+  });
+
+  try {
+    await Promise.race([allSettled, deadlineReached]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  return {
+    results: settledResults.filter(Boolean),
+    timedOut,
+    total: segmentList.length,
+  };
+}
+
 // =====================
 // 获取腾讯视频弹幕
 // =====================
@@ -699,24 +760,21 @@ export default class TencentSource extends BaseSource {
     const segmentList = segmentResult.segmentList;
     log("info", `[tencent] 弹幕分段数量: ${segmentList.length}`);
 
-    // 创建请求Promise数组
-    const promises = [];
-    for (const segment of segmentList) {
-      promises.push(
-        httpGet(segment.url, {
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-          },
-          retries: 1,
-        })
-      );
-    }
-
     // 解析弹幕数据
     let contents = [];
     try {
-      const results = await Promise.allSettled(promises);
+      const { results, timedOut, total } = await fetchTencentDanmuSegments(segmentList, {
+        deadlineMs: globals.tencentDanmuDeadlineMs,
+      });
+      const fulfilledCount = results.filter(result => result.status === "fulfilled").length;
+      const failedCount = total - fulfilledCount;
+
+      if (timedOut) {
+        log("warn", `[tencent] 弹幕分片整体等待达到 ${globals.tencentDanmuDeadlineMs}ms 截止时间，已返回 ${fulfilledCount}/${total} 个成功分片`);
+      } else if (failedCount > 0) {
+        log("warn", `[tencent] 弹幕分片部分请求失败，已返回 ${fulfilledCount}/${total} 个成功分片`);
+      }
+
       const datas = results
         .filter(result => result.status === "fulfilled")
         .map(result => {

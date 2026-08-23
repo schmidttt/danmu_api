@@ -19,7 +19,7 @@ import AIClient from './utils/ai-util.js';
 import RenrenSource from "./sources/renren.js";
 import HanjutvSource from "./sources/hanjutv.js";
 import BahamutSource from "./sources/bahamut.js";
-import TencentSource from "./sources/tencent.js";
+import TencentSource, { fetchTencentDanmuSegments } from "./sources/tencent.js";
 import IqiyiSource from "./sources/iqiyi.js";
 import MangoSource from "./sources/mango.js";
 import BilibiliSource from "./sources/bilibili.js";
@@ -392,6 +392,7 @@ test('worker.js API endpoints', async (t) => {
 
     assert.deepEqual(config.sourceOrderArr, ['tencent', 'iqiyi', 'youku', 'imgo', 'bilibili', 'migu']);
     assert.equal(config.youkuConcurrency, 16);
+    assert.equal(config.tencentDanmuDeadlineMs, 8000);
     assert.equal(config.commentCacheMinCount, 1);
     assert.deepEqual(
       resolveSearchFallbackSources(
@@ -406,6 +407,52 @@ test('worker.js API endpoints', async (t) => {
     assert.equal(getCommentCache('migu:test-small-result')?.length, 51);
 
     resetSearchState();
+  });
+
+  await t.test('tencent danmu segment deadline returns completed shards without waiting for slow shards', async () => {
+    const segments = [
+      { url: 'https://dm.video.qq.com/fast' },
+      { url: 'https://dm.video.qq.com/slow' }
+    ];
+    const request = async (url, options) => {
+      if (url.endsWith('/fast')) {
+        return { data: { barrage_list: [{ content: 'fast shard' }] } };
+      }
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
+    };
+    const startedAt = Date.now();
+
+    const result = await fetchTencentDanmuSegments(segments, {
+      request,
+      deadlineMs: 30,
+    });
+
+    assert.equal(result.timedOut, true);
+    assert.equal(result.total, 2);
+    assert.equal(result.results.filter(item => item.status === 'fulfilled').length, 1);
+    assert.equal(result.results.find(item => item.status === 'fulfilled').value.data.barrage_list[0].content, 'fast shard');
+    assert.ok(Date.now() - startedAt < 250, '整体截止时间不应继续等待慢分片');
+  });
+
+  await t.test('tencent danmu segment fetch keeps complete results when all shards finish in time', async () => {
+    const segments = [
+      { url: 'https://dm.video.qq.com/1' },
+      { url: 'https://dm.video.qq.com/2' }
+    ];
+    const result = await fetchTencentDanmuSegments(segments, {
+      request: async url => ({ data: { barrage_list: [{ content: url }] } }),
+      deadlineMs: 100,
+    });
+
+    assert.equal(result.timedOut, false);
+    assert.equal(result.total, 2);
+    assert.equal(result.results.filter(item => item.status === 'fulfilled').length, 2);
   });
 
   await t.test('search executes configured fallback only after primary sources return no candidates', async () => {
