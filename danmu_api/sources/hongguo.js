@@ -760,7 +760,12 @@ export default class HongguoSource extends BaseSource {
     try {
       const detail = JSON.parse(message);
       if (detail && typeof detail === "object") {
-        coolDownMs = Math.max(0, Number(detail.min_ban_time) || Number(detail.max_ban_time) || 0) * 1000;
+        const banSeconds = Math.max(
+          0,
+          Number(detail.min_ban_time) || 0,
+          Number(detail.max_ban_time) || 0,
+        );
+        coolDownMs = Math.min(banSeconds * 1000, 30_000);
       }
     } catch { /* message 不是 JSON 时忽略 */ }
     if (coolDownMs > 0) {
@@ -816,8 +821,12 @@ export default class HongguoSource extends BaseSource {
           if (error && error.coolDownMs) {
             // 遵守服务端给出的冷却时间并稍作随机，退避后重试当前主机
             log("warn", `[Hongguo] ${apiHost} 触发风控冷却 ${Math.round(error.coolDownMs / 1000)}s，退避后重试`);
-            await sleep(error.coolDownMs + Math.floor(Math.random() * 1000));
-            if (attempt < maxAttempts - 1) continue;
+            const canRetryCurrentHost = attempt < maxAttempts - 1;
+            const canTryNextHost = index < apiHosts.length - 1;
+            if (canRetryCurrentHost || canTryNextHost) {
+              await sleep(error.coolDownMs + Math.floor(Math.random() * 1000));
+            }
+            if (canRetryCurrentHost) continue;
           }
           const message = error && error.message ? error.message : String(error);
           failures.push({ host: apiHost, message });

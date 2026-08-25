@@ -559,9 +559,13 @@ export function convertToDanmakuJson(contents, platform) {
       if (globals.convertColor === 'color' && color === 16777215 && danmu.color_v2 === undefined) {
         let target = randomColor;
         if (gradientSampler && Math.random() < gradientChance) {
-          // 渐变色弹幕：以弹幕出现时间在色带上取色（60 秒循环一个来回），相邻弹幕颜色平滑过渡
+          // 渐变色弹幕：60 秒内从色带起点走到终点再返回，循环边界不会突变。
           const appearTime = parseFloat(pValues[0]) || 0;
-          target = gradientSampler((appearTime % 60) / 60);
+          const cyclePosition = (((appearTime % 60) + 60) % 60) / 60;
+          const gradientPosition = cyclePosition <= 0.5
+            ? cyclePosition * 2
+            : (1 - cyclePosition) * 2;
+          target = gradientSampler(gradientPosition);
           gradientCount++;
         }
         if (color !== target) {
