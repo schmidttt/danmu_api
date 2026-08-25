@@ -50,7 +50,7 @@ import { apitestJsContent } from './ui/js/apitest.js';
 import { systemSettingsJsContent } from './ui/js/systemsettings.js';
 import { previewJsContent } from './ui/js/preview.js';
 import { convertToAsciiSum } from "./utils/codec-util.js";
-import { convertToDanmakuJson, handleDanmusLike, splitBlockedWords, parseBlockedWord } from "./utils/danmu-util.js";
+import { buildGradientSampler, convertToDanmakuJson, handleDanmusLike, resolveGradientSkin, splitBlockedWords, parseBlockedWord } from "./utils/danmu-util.js";
 import { Segment, SegmentListResponse } from "./models/dandan-model.js"
 import { initBangumiData, searchBangumiData, clearBangumiDataCache, dedupeBangumiSearchResults } from "./utils/bangumi-data-util.js";
 import { generateNipaplaySignature, parseNipaplayRelatedLinks, resolveNipaplayLink, applyShiftToDanmu } from "./utils/nipaplay-util.js";
@@ -633,6 +633,36 @@ test('worker.js API endpoints', async (t) => {
     const detailHtml = `<script>window.__DATA__={"seriesDetail":${JSON.stringify(detailData)},"tail":"{}"}</script>`;
     assert.equal(parseWebSearchResults(searchHtml)[0].video_data.series_id, 'series-1');
     assert.deepEqual(parseWebSeriesDetail(detailHtml).vid_list, ['vid-1', 'vid-2']);
+    assert.deepEqual(
+      parseHongguoPlayerUrl('hongguo:v1:series-1:vid-2:88'),
+      { seriesId: 'series-1', vid: 'vid-2' }
+    );
+
+    const responseSource = new HongguoSource();
+    const cooldownError = responseSource.checkResponse({
+      code: 100,
+      message: JSON.stringify({ min_ban_time: 2, max_ban_time: 5 })
+    });
+    assert.equal(cooldownError.coolDownMs, 5000, '应遵守较长的服务端风控冷却时间');
+
+    const limiterSource = new HongguoSource();
+    const releases = [
+      await limiterSource.acquireCommentSlot(),
+      await limiterSource.acquireCommentSlot(),
+      await limiterSource.acquireCommentSlot()
+    ];
+    let fourthSlotResolved = false;
+    const fourthSlotPromise = limiterSource.acquireCommentSlot().then(release => {
+      fourthSlotResolved = true;
+      return release;
+    });
+    await Promise.resolve();
+    assert.equal(fourthSlotResolved, false, '红果弹幕并发应限制为 3');
+    releases.shift()();
+    const fourthRelease = await fourthSlotPromise;
+    assert.equal(fourthSlotResolved, true);
+    releases.forEach(release => release());
+    fourthRelease();
 
     const webSource = new HongguoSource();
     webSource.request = async () => { throw new Error('web search should avoid app fallback'); };
@@ -667,6 +697,22 @@ test('worker.js API endpoints', async (t) => {
       () => fallbackSource.getEpisodes('series-1')
     );
     assert.deepEqual(fallbackDetails.episodes.map(item => item.vid), ['vid-1', 'vid-2']);
+
+    const richDetailData = {
+      ...detailData,
+      vid_list: [
+        { vid: 'vid-1', episode_title: '第一集', duration: 42 },
+        { video_id: 'vid-2', title: '第二集', video_duration: 45 }
+      ]
+    };
+    const richDetailHtml = `<script>window.__DATA__={"seriesDetail":${JSON.stringify(richDetailData)},"tail":"{}"}</script>`;
+    const richFallbackSource = new HongguoSource();
+    richFallbackSource.request = async () => { throw new Error('app detail unavailable'); };
+    const richFallbackDetails = await withMockFetch(
+      url => Promise.resolve(mockHtmlResponse(richDetailHtml, url)),
+      () => richFallbackSource.getEpisodes('series-1')
+    );
+    assert.deepEqual(richFallbackDetails.episodes.map(item => item.duration), [42, 45]);
 
     let windowCalls = 0;
     fallbackSource.fetchCommentWindow = async (_info, startMs) => {
@@ -1100,6 +1146,71 @@ test('worker.js API endpoints', async (t) => {
     ], 'test');
     assert.equal(traditional[0].m, '來看能不能發彈幕');
 
+    resetSearchState();
+  });
+
+  await t.test('gradient color conversion is smooth, bounded, and preserves native color_v2', () => {
+    assert.equal(resolveGradientSkin(' BILIBILI '), '16478873,3389695');
+    assert.equal(resolveGradientSkin('rainbow'), '16711680,16753920,16776960,65280,65535,255,8388863');
+    assert.equal(resolveGradientSkin('16711680,255'), '16711680,255');
+
+    const sampler = buildGradientSampler('16711680,255');
+    assert.equal(sampler(0), 16711680);
+    assert.equal(sampler(0.5), 8388736);
+    assert.equal(sampler(1), 255);
+    assert.equal(buildGradientSampler('invalid'), null);
+
+    const baseEnv = {
+      BLOCKED_WORDS: '',
+      GROUP_MINUTE: '0',
+      DANMU_LIMIT: '0',
+      CONVERT_COLOR: 'color',
+      COLOR_POOL: '65280',
+      GRADIENT_CHANCE: '100',
+      GRADIENT_COLORS: '16711680,255',
+      LOG_LEVEL: 'error'
+    };
+    Globals.init(baseEnv);
+    const converted = convertToDanmakuJson(
+      [0, 15, 30, 45, 60].map((seconds, index) => ({
+        progress: seconds * 1000,
+        mode: 1,
+        color: 16777215,
+        content: `gradient-${index}`
+      })),
+      'test'
+    );
+    assert.deepEqual(
+      converted.map(item => Number(item.p.split(',')[2])),
+      [16711680, 8388736, 255, 8388736, 16711680],
+      '60 秒周期应从起点走到终点再平滑返回起点'
+    );
+
+    const nativeColorV2 = '{"colors":["#FB7299","#33B8FF"]}';
+    const native = convertToDanmakuJson([
+      { progress: 1000, mode: 1, color: 16777215, color_v2: nativeColorV2, content: 'native-gradient' }
+    ], 'bilibili1');
+    assert.equal(Number(native[0].p.split(',')[2]), 16777215);
+    assert.equal(native[0].color_v2, nativeColorV2);
+
+    Globals.init({ ...baseEnv, GROUP_MINUTE: '1' });
+    const grouped = convertToDanmakuJson([
+      { progress: 1000, mode: 1, color: 16777215, content: 'same' },
+      { progress: 2000, mode: 1, color: 16777215, color_v2: nativeColorV2, content: 'same' }
+    ], 'bilibili1');
+    assert.equal(grouped.length, 1);
+    assert.equal(grouped[0].color_v2, nativeColorV2);
+
+    Globals.init({ ...baseEnv, COLOR_POOL: '', GRADIENT_COLORS: 'invalid' });
+    Globals.envs.colorPool = '';
+    Globals.envs.gradientColors = 'invalid';
+    const safeFallback = convertToDanmakuJson([
+      { progress: 1000, mode: 1, color: 16777215, content: 'fallback-white' }
+    ], 'test');
+    assert.equal(Number(safeFallback[0].p.split(',')[2]), 16777215);
+
+    const defaultConfig = Globals.init({ CONVERT_COLOR: 'color', LOG_LEVEL: 'error' });
+    assert.equal(defaultConfig.gradientChance, 0);
     resetSearchState();
   });
 
@@ -1596,6 +1707,9 @@ test('worker.js API endpoints', async (t) => {
       assert.match(systemSettingsJsContent, /const isMergeSourcePairs = currentKey === 'MERGE_SOURCE_PAIRS'/);
       assert.match(systemSettingsJsContent, /preventDuplicateSources && selectedSourceTokens\.has\(value\)/);
       assert.match(systemSettingsJsContent, /String\(element\.dataset\.value \|\| ''\)\.split\('&'\)/);
+      assert.match(systemSettingsJsContent, /function parseBulkMapItems\(silent = false\)/);
+      assert.match(systemSettingsJsContent, /function syncBulkMapValue\(\)/);
+      assert.match(systemSettingsJsContent, /split\(\/\[;\\r\\n\]\+\//);
       assert.doesNotThrow(() => new Function(apitestJsContent));
       assert.doesNotThrow(() => new Function(mainJsContent));
       assert.doesNotThrow(() => new Function(systemSettingsJsContent));

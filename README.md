@@ -100,7 +100,7 @@ LogVar 弹幕 API 服务器
   - 支持链接尾部追加时间偏移，例如：`https://www.iqiyi.com/v_xxx.html@-50`（提前50秒）、`https://v.qq.com/x/cover/xxx.html@%11`（百分比缩放）
 - **弹幕转换功能**：支持通过环境变量配置弹幕转换规则，包括：
   - 将顶部和底部弹幕转换为浮动弹幕（`CONVERT_TOP_BOTTOM_TO_SCROLL`）
-  - 转换弹幕颜色为白色或彩色（`CONVERT_COLOR`），支持自定义颜色池（`COLOR_POOL`）
+  - 转换弹幕颜色为白色或彩色（`CONVERT_COLOR`），支持自定义颜色池（`COLOR_POOL`）与按时间平滑流转的渐变色带（`GRADIENT_CHANCE`、`GRADIENT_COLORS`）
   - 解决部分播放器不支持顶部/底部弹幕和彩色弹幕的问题
   - 增加点赞数显示，先去重再拼接点赞标记，点赞数缩写显示，≥5 才显示，避免低赞干扰
 - **弹幕限制数量**：支持通过环境变量配置等间隔采样弹幕数量。
@@ -478,6 +478,8 @@ API 支持返回 Bilibili 标准 XML 格式的弹幕数据，通过查询参数 
 | CONVERT_TOP_BOTTOM_TO_SCROLL    | 【可选】是否将顶部和底部弹幕转换为浮动弹幕，默认为`false`（不转换），启用后顶部弹幕（ct=5）和底部弹幕（ct=4）会被转换为浮动弹幕（ct=1），可选值：`true`、`false`       |
 | CONVERT_COLOR    | 【可选】弹幕转换颜色配置，默认为`default`（不转换），`white` 将所有非白色的弹幕颜色转换为纯白色，`color` 将所有白色弹幕转换为随机颜色（包含白色），可选值：`default`、`white`、`color`       |
 | COLOR_POOL    | 【可选】自定义颜色池（`CONVERT_COLOR`为`color`时生效），不配置使用默认颜色池（白、红、橙、黄、绿、青、蓝、紫、粉），格式：十进制颜色值逗号分隔，例如：`16711680,65280,255,16776960`       |
+| GRADIENT_CHANCE | 【可选】渐变色带取色概率（`CONVERT_COLOR`为`color`时生效），范围 `0-100`，默认 `0`（关闭）。命中的白色弹幕会按出现时间从色带平滑取色；未命中时继续使用 `COLOR_POOL`。普通播放器显示为相邻弹幕随时间平滑换色；源数据自带的 `color_v2` 会原样透传给支持该扩展的播放器。 |
+| GRADIENT_COLORS | 【可选】渐变色带（`CONVERT_COLOR`为`color`时生效），可填 `bilibili`（默认）、`sweet`、`cyber`、`sunset`、`ocean`、`mint`、`rainbow`，或至少两个十进制颜色值并用逗号分隔。 |
 | LIKE_SWITCH    | 【可选】弹幕点赞数显示开关，默认为`true`（开启），开启后会在弹幕内容后显示点赞数标记，≥5 才显示，避免低赞干扰       |
 | DANMU_OUTPUT_FORMAT    | 【可选】弹幕输出格式，默认为`json`，可选值：`json`（JSON格式）、`xml`（XML格式）及所有`@dan-uni/dan-any`支持的输出格式，支持通过查询参数`?format=xml`或`?format=json`等覆盖此设置，优先级：查询参数 > 环境变量 > 默认值       |
 | DANMU_SIMPLIFIED_TRADITIONAL    | 【可选】弹幕简繁体转换设置：default（默认不转换）、simplified（繁转简）、traditional（简转繁）       |
