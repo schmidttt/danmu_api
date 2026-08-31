@@ -9,7 +9,7 @@ import { extractTitleSeasonEpisode, getBangumi, getComment, getCommentByUrl, mat
 import { stripLinkOffset, applyOffset } from "./utils/offset-util.js";
 import { handleFavoriteAdd, handleFavoriteList, handleFavoriteRefresh, handleFavoriteRemove } from './apis/favorite-api.js';
 import { handleClearCache } from './apis/system-api.js';
-import { httpPost } from './utils/http-util.js';
+import { httpGet, httpPost } from './utils/http-util.js';
 import { getRedisCaches, getRedisKey, pingRedis, setRedisKey, setRedisKeyWithExpiry, updateRedisCaches } from "./utils/redis-util.js";
 import { getLocalRedisKey, setLocalRedisKey, setLocalRedisKeyWithExpiry } from "./utils/local-redis-util.js";
 import { getImdbepisodes } from "./utils/imdb-util.js";
@@ -197,6 +197,71 @@ test('worker.js API endpoints', async (t) => {
   const hongguoSource = new HongguoSource();
   const animekoSource = new AnimekoSource();
   const otherSource = new OtherSource();
+
+  await t.test('v1.20.10 source compatibility fixes preserve the fork runtime', async () => {
+    assert.equal(Globals.VERSION, '1.20.10');
+
+    let maiduiduiRequestUrl;
+    const maiduiduiResults = await withMockFetch(async (url) => {
+      maiduiduiRequestUrl = String(url);
+      return mockJsonResponse({
+        data: [{
+          vodList: [
+            { name: '兼容性测试剧', uuid: 'series-1', vodType: 0, downImage: 'https://example.com/series.jpg' },
+            { name: '应过滤花絮', uuid: 'clip-1', vodType: 3 }
+          ]
+        }]
+      }, maiduiduiRequestUrl);
+    }, () => maiduiduiSource.search('兼容性测试剧'));
+
+    assert.match(maiduiduiRequestUrl, /\/searchApi\/search\/getAllSearchResult\.action$/);
+    assert.deepEqual(maiduiduiResults, [{
+      name: '兼容性测试剧',
+      type: '剧集',
+      year: null,
+      img: 'https://example.com/series.jpg',
+      url: 'series-1'
+    }]);
+
+    const sohuVideoItem = sohuSource.filterSohuSearchItem({
+      vid: '123456',
+      video_name: '<<<兼容性测试剧>>>',
+      meta: ['电视剧 | 内地 | 2026年'],
+      poster: 'https://example.com/sohu.jpg'
+    }, '兼容性测试剧');
+    assert.equal(sohuVideoItem.mediaId, '123456');
+    assert.equal(sohuVideoItem.title, '兼容性测试剧');
+    assert.equal(sohuVideoItem.type, '电视剧');
+    assert.equal(sohuVideoItem.year, '2026');
+    assert.equal(sohuVideoItem.imageUrl, 'https://example.com/sohu.jpg');
+
+    let sohuSearchUrl;
+    let sohuSearchHeaders;
+    await withMockFetch(async (url, options) => {
+      sohuSearchUrl = String(url);
+      sohuSearchHeaders = options.headers;
+      return mockJsonResponse({ data: { items: [] } }, sohuSearchUrl);
+    }, () => sohuSource.search('兼容性测试剧'));
+    const signedSearchUrl = new URL(sohuSearchUrl);
+    assert.match(signedSearchUrl.searchParams.get('fpc'), /^[0-9a-f]{32}$/);
+    assert.match(signedSearchUrl.searchParams.get('code'), /^[0-9a-f]{32}$/);
+    assert.match(signedSearchUrl.searchParams.get('timeStamp'), /^\d+$/);
+    assert.equal(sohuSearchHeaders.Origin, 'https://tv.sohu.com');
+
+    assert.deepEqual(
+      await sohuSource.extractVidAndAid('https://tv.sohu.com/play?vid=123456&aid=654321'),
+      { vid: '123456', aid: '654321' }
+    );
+
+    const gbkResponse = await withMockFetch(async (url) => ({
+      ok: true,
+      status: 200,
+      url: String(url),
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      arrayBuffer: async () => Uint8Array.from([0xb2, 0xe2, 0xca, 0xd4]).buffer
+    }), () => httpGet('https://example.com/gbk', { encoding: 'gbk' }));
+    assert.equal(gbkResponse.data, '测试');
+  });
 
   await t.test('episode matching prefers main content while preserving platform candidates', () => {
     const perfectWorldEpisodes = [
