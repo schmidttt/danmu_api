@@ -2,33 +2,33 @@ name: Fork Sync Pull Request
 
 on:
   schedule:
-    - cron: "0 21 * * *" # 北京时间每天 05:00 左右
+    - cron: "17 21 * * *" # 北京时间每天 05:17 左右，避开 GitHub Actions 整点高峰
   workflow_dispatch:
 
 permissions:
   actions: write
   contents: write
-  issues: write
   pull-requests: write
 
 concurrency:
   group: fork-sync-${{ github.repository }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   UPSTREAM_REPO: huangxd-/danmu_api
   UPSTREAM_BRANCH: main
-  SYNC_BRANCH: upstream-sync
+  SYNC_BRANCH_PREFIX: automation/upstream-
 
 jobs:
   sync_with_upstream:
     name: Propose upstream sync
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: github.event.repository.fork
 
     steps:
       - name: Checkout target repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: main
           fetch-depth: 0
@@ -40,6 +40,7 @@ jobs:
 
       - name: Fetch upstream
         run: |
+          set -euo pipefail
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || \
             git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
           git fetch --prune upstream "${UPSTREAM_BRANCH}"
@@ -47,22 +48,66 @@ jobs:
       - name: Check for upstream changes
         id: updates
         run: |
-          if git merge-base --is-ancestor "upstream/${UPSTREAM_BRANCH}" origin/main; then
+          set -euo pipefail
+          upstream_ref="upstream/${UPSTREAM_BRANCH}"
+
+          if git merge-base --is-ancestor "${upstream_ref}" origin/main; then
             echo "has_changes=false" >> "${GITHUB_OUTPUT}"
             echo "No upstream changes need to be proposed."
-          else
-            echo "has_changes=true" >> "${GITHUB_OUTPUT}"
-            echo "upstream_sha=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
 
-      - name: Prepare sync branch
-        id: merge
+          upstream_sha="$(git rev-parse "${upstream_ref}")"
+          upstream_short_sha="${upstream_sha:0:12}"
+          base_sha="$(git merge-base origin/main "${upstream_ref}")"
+          sync_branch="${SYNC_BRANCH_PREFIX}${upstream_short_sha}"
+
+          {
+            echo "has_changes=true"
+            echo "upstream_sha=${upstream_sha}"
+            echo "upstream_short_sha=${upstream_short_sha}"
+            echo "base_sha=${base_sha}"
+            echo "sync_branch=${sync_branch}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Check for an existing proposal
+        id: existing
         if: steps.updates.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_BRANCH: ${{ steps.updates.outputs.sync_branch }}
         run: |
+          set -euo pipefail
+          pr_url="$(gh pr list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --head "${SYNC_BRANCH}" \
+            --json url \
+            --jq '.[0].url // empty')"
+
+          if [ -n "${pr_url}" ]; then
+            {
+              echo "exists=true"
+              echo "url=${pr_url}"
+            } >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Prepare upstream integration branch
+        id: merge
+        if: steps.updates.outputs.has_changes == 'true' && steps.existing.outputs.exists != 'true'
+        env:
+          SYNC_BRANCH: ${{ steps.updates.outputs.sync_branch }}
+        run: |
+          set -euo pipefail
           git switch -C "${SYNC_BRANCH}" origin/main
 
           if git merge --no-edit --no-ff "upstream/${UPSTREAM_BRANCH}"; then
-            echo "conflict=false" >> "${GITHUB_OUTPUT}"
+            {
+              echo "conflict=false"
+              echo "head_sha=$(git rev-parse HEAD)"
+            } >> "${GITHUB_OUTPUT}"
           else
             conflict_files="$(git diff --name-only --diff-filter=U)"
             git merge --abort
@@ -74,121 +119,106 @@ jobs:
             } >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Notify owner about merge conflicts
+      - name: Report merge conflicts
         if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'true'
         env:
+          BASE_SHA: ${{ steps.updates.outputs.base_sha }}
+          UPSTREAM_SHA: ${{ steps.updates.outputs.upstream_sha }}
           CONFLICT_FILES: ${{ steps.merge.outputs.files }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          issue_title="[automation] Upstream sync requires conflict resolution"
-          issue_number="$(gh issue list \
-            --repo "${GITHUB_REPOSITORY}" \
-            --state open \
-            --limit 100 \
-            --json number,title \
-            --jq ".[] | select(.title == \"${issue_title}\") | .number" | head -n 1)"
-
           {
-            echo "@${GITHUB_REPOSITORY_OWNER}"
+            echo "## Upstream sync requires manual conflict resolution"
             echo
-            echo "The scheduled upstream sync could not be merged safely into main."
+            echo "- Reviewed merge base: \`${BASE_SHA}\`"
+            echo "- Current upstream: \`${UPSTREAM_SHA}\`"
+            echo "- Production branch was not changed."
             echo
-            echo "Conflicting files:"
+            echo "### Conflicting files"
+            echo
+            echo '~~~text'
             printf '%s\n' "${CONFLICT_FILES}"
-            echo
-            echo "Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo
-            echo "No production branch was changed."
-          } > "${RUNNER_TEMP}/upstream-conflict.md"
+            echo '~~~'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
-          if [ -n "${issue_number}" ]; then
-            gh issue comment "${issue_number}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --body-file "${RUNNER_TEMP}/upstream-conflict.md"
-          else
-            gh issue create \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "${issue_title}" \
-              --assignee "${GITHUB_REPOSITORY_OWNER}" \
-              --body-file "${RUNNER_TEMP}/upstream-conflict.md"
-          fi
-
+          echo "::error title=Upstream merge conflict::Review the conflict list in the job summary. Production main was not changed."
           exit 1
 
       - name: Push automation branch
-        if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
+        if: steps.updates.outputs.has_changes == 'true' && steps.existing.outputs.exists != 'true' && steps.merge.outputs.conflict == 'false'
+        env:
+          SYNC_BRANCH: ${{ steps.updates.outputs.sync_branch }}
         run: |
+          set -euo pipefail
           git fetch origin \
             "refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
           git push --force-with-lease origin \
             "HEAD:refs/heads/${SYNC_BRANCH}"
 
-      - name: Create or update upstream sync pull request
+      - name: Create Draft upstream integration pull request
         id: pull_request
-        if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
+        if: steps.updates.outputs.has_changes == 'true' && steps.existing.outputs.exists != 'true' && steps.merge.outputs.conflict == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ steps.updates.outputs.base_sha }}
           UPSTREAM_SHA: ${{ steps.updates.outputs.upstream_sha }}
+          UPSTREAM_SHORT_SHA: ${{ steps.updates.outputs.upstream_short_sha }}
+          SYNC_BRANCH: ${{ steps.updates.outputs.sync_branch }}
         run: |
-          pr_title="chore: sync upstream main"
-          pr_number="$(gh pr list \
-            --repo "${GITHUB_REPOSITORY}" \
-            --base main \
-            --head "${SYNC_BRANCH}" \
-            --state open \
-            --json number \
-            --jq '.[0].number // empty')"
+          set -euo pipefail
+          commits_file="${RUNNER_TEMP}/upstream-commits.md"
+          body_file="${RUNNER_TEMP}/upstream-sync-pr.md"
+
+          git log \
+            --format='- %h %s' \
+            "${BASE_SHA}..upstream/${UPSTREAM_BRANCH}" \
+            > "${commits_file}"
 
           {
             echo "@${GITHUB_REPOSITORY_OWNER}"
             echo
-            echo "This PR was created automatically from ${UPSTREAM_REPO}:${UPSTREAM_BRANCH}."
+            echo "This Draft PR contains the complete upstream change set since the last integrated upstream commit."
             echo
-            echo "- Upstream commit: ${UPSTREAM_SHA}"
-            echo "- Target branch: main"
-            echo "- Automation branch: ${SYNC_BRANCH}"
+            echo "- Upstream repository: \`${UPSTREAM_REPO}\`"
+            echo "- Previous upstream base: \`${BASE_SHA}\`"
+            echo "- Proposed upstream commit: \`${UPSTREAM_SHA}\`"
+            echo "- Automation branch: \`${SYNC_BRANCH}\`"
             echo
-            echo "Do not merge until the Node tests, Docker build, and Vercel Preview are successful."
-            echo "If upstream changes overlap local fixes, review the matching and authorization regression tests carefully."
-          } > "${RUNNER_TEMP}/upstream-sync-pr.md"
+            echo "## Upstream commits"
+            echo
+            cat "${commits_file}"
+            echo
+            echo "## Review requirements"
+            echo
+            echo "- Treat upstream behavior and architecture as the default."
+            echo "- Re-adapt downstream security, reliability, matching, and performance patches where they still provide additional protection."
+            echo "- Remove downstream implementations that upstream now supersedes."
+            echo "- Do not merge until Node tests, Docker validation, Vercel Preview, and representative behavior checks pass."
+            echo "- Production merging still requires explicit owner confirmation."
+          } > "${body_file}"
 
-          if [ -z "${pr_number}" ]; then
-            pr_url="$(gh pr create \
-              --repo "${GITHUB_REPOSITORY}" \
-              --base main \
-              --head "${SYNC_BRANCH}" \
-              --title "${pr_title}" \
-              --assignee "${GITHUB_REPOSITORY_OWNER}" \
-              --body-file "${RUNNER_TEMP}/upstream-sync-pr.md")"
-            pr_number="$(gh pr view "${pr_url}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --json number \
-              --jq '.number')"
-          else
-            gh pr edit "${pr_number}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "${pr_title}" \
-              --add-assignee "${GITHUB_REPOSITORY_OWNER}" \
-              --body-file "${RUNNER_TEMP}/upstream-sync-pr.md"
-            gh pr comment "${pr_number}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --body "@${GITHUB_REPOSITORY_OWNER} The upstream sync proposal was updated to ${UPSTREAM_SHA}."
-            pr_url="$(gh pr view "${pr_number}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --json url \
-              --jq '.url')"
-          fi
+          pr_url="$(gh pr create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base main \
+            --head "${SYNC_BRANCH}" \
+            --draft \
+            --title "chore: integrate upstream ${UPSTREAM_SHORT_SHA}" \
+            --assignee "${GITHUB_REPOSITORY_OWNER}" \
+            --body-file "${body_file}")"
 
-          echo "number=${pr_number}" >> "${GITHUB_OUTPUT}"
-          echo "url=${pr_url}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "url=${pr_url}"
+            echo "number=$(gh pr view "${pr_url}" --repo "${GITHUB_REPOSITORY}" --json number --jq '.number')"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Dispatch branch validation workflows
-        if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
+        id: validation
+        if: steps.pull_request.outputs.url != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_BRANCH: ${{ steps.updates.outputs.sync_branch }}
+          HEAD_SHA: ${{ steps.merge.outputs.head_sha }}
         run: |
           set -euo pipefail
-          head_sha="$(git rev-parse HEAD)"
           workflows=(test.yml docker-image.yml)
           declare -A run_ids
 
@@ -198,7 +228,7 @@ jobs:
               --ref "${SYNC_BRANCH}"
 
             run_id=""
-            for attempt in {1..30}; do
+            for attempt in {1..45}; do
               run_id="$(gh run list \
                 --repo "${GITHUB_REPOSITORY}" \
                 --workflow "${workflow}" \
@@ -206,7 +236,7 @@ jobs:
                 --event workflow_dispatch \
                 --limit 20 \
                 --json databaseId,headSha \
-                --jq ".[] | select(.headSha == \"${head_sha}\") | .databaseId" | head -n 1)"
+                --jq ".[] | select(.headSha == \"${HEAD_SHA}\") | .databaseId" | head -n 1)"
               if [ -n "${run_id}" ]; then
                 break
               fi
@@ -227,68 +257,62 @@ jobs:
               --exit-status
           done
 
-      - name: Notify owner that validation passed
-        if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ steps.pull_request.outputs.number }}
-        run: |
-          gh pr comment "${PR_NUMBER}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --body "@${GITHUB_REPOSITORY_OWNER} Automated Node and Docker validation passed. Review the diff and Vercel Preview before merging."
+          {
+            echo "test_run_id=${run_ids[test.yml]}"
+            echo "docker_run_id=${run_ids[docker-image.yml]}"
+          } >> "${GITHUB_OUTPUT}"
 
-          for issue_title in \
-            "[automation] Upstream sync requires conflict resolution" \
-            "[automation] Upstream sync workflow failed"; do
-            issue_number="$(gh issue list \
-              --repo "${GITHUB_REPOSITORY}" \
-              --state open \
-              --limit 100 \
-              --json number,title \
-              --jq ".[] | select(.title == \"${issue_title}\") | .number" | head -n 1)"
-            if [ -n "${issue_number}" ]; then
-              gh issue close "${issue_number}" \
-                --repo "${GITHUB_REPOSITORY}" \
-                --comment "Resolved by upstream sync PR #${PR_NUMBER}."
-            fi
-          done
+      - name: Record successful proposal
+        if: steps.pull_request.outputs.url != '' && steps.validation.outcome == 'success'
+        env:
+          PR_URL: ${{ steps.pull_request.outputs.url }}
+          UPSTREAM_SHA: ${{ steps.updates.outputs.upstream_sha }}
+          TEST_RUN_ID: ${{ steps.validation.outputs.test_run_id }}
+          DOCKER_RUN_ID: ${{ steps.validation.outputs.docker_run_id }}
+        run: |
+          {
+            echo "## Draft upstream proposal created"
+            echo
+            echo "- Pull request: ${PR_URL}"
+            echo "- Upstream commit: \`${UPSTREAM_SHA}\`"
+            echo "- Node validation: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${TEST_RUN_ID}"
+            echo "- Docker validation: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${DOCKER_RUN_ID}"
+            echo "- Review Vercel Preview separately before any merge."
+            echo "- Production main was not changed."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Record existing proposal
+        if: steps.existing.outputs.exists == 'true'
+        env:
+          PR_URL: ${{ steps.existing.outputs.url }}
+          UPSTREAM_SHA: ${{ steps.updates.outputs.upstream_sha }}
+        run: |
+          {
+            echo "## Existing upstream proposal"
+            echo
+            echo "- Pull request: ${PR_URL}"
+            echo "- Upstream commit: \`${UPSTREAM_SHA}\`"
+            echo "- The automation branch was not overwritten."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Record no-change result
+        if: steps.updates.outputs.has_changes != 'true'
+        run: |
+          {
+            echo "## Fork is aligned with upstream"
+            echo
+            echo "The current upstream commit is already an ancestor of production main."
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Report unexpected workflow failure
         if: failure() && steps.merge.outputs.conflict != 'true'
         continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          issue_title="[automation] Upstream sync workflow failed"
-          issue_number="$(gh issue list \
-            --repo "${GITHUB_REPOSITORY}" \
-            --state open \
-            --limit 100 \
-            --json number,title \
-            --jq ".[] | select(.title == \"${issue_title}\") | .number" | head -n 1)"
-
           {
-            echo "@${GITHUB_REPOSITORY_OWNER}"
+            echo "## Upstream sync workflow failed"
             echo
-            echo "The upstream sync workflow failed before it could complete safely."
+            echo "Review the failed step in this run."
             echo
-            echo "Workflow run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo
-            echo "Review the failed step. No automatic merge into main was performed."
-          } > "${RUNNER_TEMP}/upstream-failure.md"
-
-          if [ -n "${issue_number}" ]; then
-            gh issue comment "${issue_number}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --body-file "${RUNNER_TEMP}/upstream-failure.md"
-          else
-            gh issue create \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "${issue_title}" \
-              --assignee "${GITHUB_REPOSITORY_OWNER}" \
-              --body-file "${RUNNER_TEMP}/upstream-failure.md"
-          fi
-
-      - name: Record no-change result
-        if: steps.updates.outputs.has_changes != 'true'
-        run: echo "The fork already contains the latest upstream commit."
+            echo "No automatic merge into production main was performed."
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "::error title=Upstream sync workflow failed::Review the failed step. Production main was not changed."

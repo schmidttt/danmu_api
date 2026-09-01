@@ -21,7 +21,7 @@ jobs:
     steps:
       # 检出代码
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # 从 danmu_api/configs/globals.js 中读取版本号
       - name: Read version from globals.js
