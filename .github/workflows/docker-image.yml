@@ -12,11 +12,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: docker-validation-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     # PRs validate the image without secrets. Publishing is limited to upstream main.
     if: github.event_name != 'push' || github.repository == 'huangxd-/danmu_api'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       # 检出代码
@@ -53,6 +58,10 @@ jobs:
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
+        with:
+          # QEMU 10.2.3 can intermittently SIGILL during Node 22 Alpine npm installs.
+          image: docker.io/tonistiigi/binfmt:qemu-v9.2.2-52
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
