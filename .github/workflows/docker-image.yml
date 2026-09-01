@@ -41,7 +41,7 @@ jobs:
       # ✅ 先登录，再初始化 Buildx，避免拉取 BuildKit 镜像时触发匿名限速
       - name: Login to Docker Hub
         if: github.event_name == 'push' && github.repository == 'huangxd-/danmu_api'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
@@ -52,10 +52,10 @@ jobs:
         run: docker pull moby/buildkit:buildx-stable-1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # PR 构建不登录、不推送，避免 fork 因无法读取 secrets 而失败
       - name: Build Docker image without publishing
