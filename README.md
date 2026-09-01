@@ -1,3 +1,21 @@
+# schmidttt/danmu_api 维护说明
+
+本仓库长期跟随上游 [`huangxd-/danmu_api`](https://github.com/huangxd-/danmu_api)，上游代码和设计是项目基线；本仓库只补充尚未被上游覆盖、且有测试保护的安全、可靠性、匹配与性能修复。
+
+## 当前维护工作流
+
+1. 每天检查上游 `main`；发现新提交后，以完整上游变更创建独立的 `automation/upstream-<sha>` **Draft PR**，不会自动合并生产分支。
+2. 审查时以上游实现为默认选择，同时逐项确认本仓库的补丁是保留、适配、缩减还是可由上游替代；具体边界记录在 [`DOWNSTREAM_PATCHES.md`](DOWNSTREAM_PATCHES.md)。
+3. 每个升级 PR 都要通过 Node 测试、Docker 构建、Vercel Preview 和代表性功能验证；冲突或验证失败时停止流程，生产分支保持不变。
+4. 只有在人工确认后才合并到 `main`；随后检查生产部署、线上行为和回滚条件。任何检查与部署过程都不得读取或暴露生产凭据。
+5. 后续维护继续沿用这套“上游优先、补丁可验证、流程可回滚”的逻辑，并在上游已覆盖本地修复时及时收敛下游差异。
+
+下面完整保留上游项目说明；除本节明确标注的维护策略外，功能、配置和部署文档均以上游说明及本仓库实际代码为准。
+
+---
+
+## 上游项目说明
+
 <div align="center">
   <img src="https://i.mji.rip/2025/09/27/eedc7b701c0fa5c1f7c175b22f441ad9.jpeg" alt="Clash" width="128" style="border-radius: 16px;" />
 </div>
