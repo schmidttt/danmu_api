@@ -189,11 +189,12 @@ jobs:
             echo
             echo "## Review requirements"
             echo
-            echo "- Treat upstream behavior and architecture as the default."
-            echo "- Re-adapt downstream security, reliability, matching, and performance patches where they still provide additional protection."
-            echo "- Remove downstream implementations that upstream now supersedes."
-            echo "- Do not merge until Node tests, Docker validation, Vercel Preview, and representative behavior checks pass."
-            echo "- Production merging still requires explicit owner confirmation."
+            echo "- [ ] Treat upstream behavior and architecture as the default."
+            echo "- [ ] Classify every active patch in \`DOWNSTREAM_PATCHES.md\` as retained, adapted, reduced, or retired."
+            echo "- [ ] Remove downstream implementations that upstream now supersedes."
+            echo "- [ ] Confirm Node tests and Docker validation pass."
+            echo "- [ ] Verify the Ready Vercel Preview and representative behavior."
+            echo "- [ ] Obtain explicit owner confirmation before merging to production."
           } > "${body_file}"
 
           pr_url="$(gh pr create \
@@ -223,6 +224,7 @@ jobs:
           declare -A run_ids
 
           for workflow in "${workflows[@]}"; do
+            dispatched_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             gh workflow run "${workflow}" \
               --repo "${GITHUB_REPOSITORY}" \
               --ref "${SYNC_BRANCH}"
@@ -235,8 +237,8 @@ jobs:
                 --branch "${SYNC_BRANCH}" \
                 --event workflow_dispatch \
                 --limit 20 \
-                --json databaseId,headSha \
-                --jq ".[] | select(.headSha == \"${HEAD_SHA}\") | .databaseId" | head -n 1)"
+                --json databaseId,headSha,createdAt \
+                --jq ".[] | select(.headSha == \"${HEAD_SHA}\" and .createdAt >= \"${dispatched_at}\") | .databaseId" | head -n 1)"
               if [ -n "${run_id}" ]; then
                 break
               fi
