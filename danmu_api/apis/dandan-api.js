@@ -24,6 +24,7 @@ import AIClient from '../utils/ai-util.js';
 import { getLogNameByKey, getSourceByKey, getSourceMetaByKey } from "../sources/registry.js";
 import { isHongguoPlayerUrl } from "../sources/hongguo.js";
 import { Anime, AnimeMatch, Episodes, Bangumi } from "../models/dandan-model.js";
+import { runWithRequestBudget, throwIfRequestCancelled } from '../utils/request-budget-util.js';
 
 // =====================
 // 兼容弹弹play接口
@@ -441,6 +442,7 @@ async function executeSourceHandlers(resultData, queryTitle, targetAnimesList, r
 
   // 并发执行所有源的handleAnimes
   const results = await Promise.allSettled(sourceTasks.map(task => task.promise));
+  throwIfRequestCancelled();
 
   // 按SOURCE_ORDER顺序合并各源的独立结果到目标容器
   // 先处理的源数据优先保留（animeId去重、detailStore键去重）
@@ -469,6 +471,7 @@ async function executeSourceHandlers(resultData, queryTitle, targetAnimesList, r
       }
     }
   }
+  return results.some(result => result.status === 'rejected');
 }
 
 export function resolveSearchFallbackSources(primaryOrder = [], fallbackOrder = []) {
@@ -492,25 +495,28 @@ function createSourceSearchPromise(source, queryTitle, preferAnimeId = null, pre
   return sourceLogContext.run(meta.logName, () => meta.instance.search(...args));
 }
 
-async function executeSearchPipelines(sourceOrder, queryTitle, querySeason, preferAnimeId, preferSource, resultData, curAnimes, requestAnimeDetailsMap) {
+async function executeSearchPipelines(sourceOrder, queryTitle, querySeason, preferAnimeId, preferSource, resultData, curAnimes, requestAnimeDetailsMap, deadline) {
+  let incomplete = false;
   const pipelineTasks = sourceOrder.map((source) => {
     const isolatedAnimes = [];
     const isolatedDetailStore = new Map();
-    const pipelinePromise = Promise.resolve()
-      .then(() => createSourceSearchPromise(source, queryTitle, preferAnimeId, preferSource))
-      .then(async (searchResult) => {
-        resultData[source] = searchResult;
-        await executeSourceHandlers(
-          { [source]: searchResult },
-          queryTitle,
-          isolatedAnimes,
-          isolatedDetailStore,
-          querySeason,
-          preferAnimeId,
-          preferSource,
-          sourceOrder
-        );
-      });
+    const pipelinePromise = runWithRequestBudget(deadline - Date.now(), async () => {
+      const searchResult = await createSourceSearchPromise(source, queryTitle, preferAnimeId, preferSource);
+      throwIfRequestCancelled();
+      resultData[source] = searchResult;
+      const handlerFailed = await executeSourceHandlers(
+        { [source]: searchResult },
+        queryTitle,
+        isolatedAnimes,
+        isolatedDetailStore,
+        querySeason,
+        preferAnimeId,
+        preferSource,
+        sourceOrder
+      );
+      throwIfRequestCancelled();
+      incomplete ||= handlerFailed;
+    });
     return { key: source, animes: isolatedAnimes, detailStore: isolatedDetailStore, promise: pipelinePromise };
   });
 
@@ -519,6 +525,8 @@ async function executeSearchPipelines(sourceOrder, queryTitle, querySeason, pref
 
   for (let i = 0; i < pipelineTasks.length; i++) {
     if (pipelineResults[i].status === 'rejected') {
+      incomplete = true;
+      delete resultData[pipelineTasks[i].key];
       log("error", `[system] [searchAnime] 源 ${formatSourceKeyForLog(pipelineTasks[i].key)} 管道处理失败: ${pipelineResults[i].reason}`);
       continue;
     }
@@ -537,6 +545,7 @@ async function executeSearchPipelines(sourceOrder, queryTitle, querySeason, pref
       }
     }
   }
+  return incomplete;
 }
 
 // Extracted function for GET /api/v2/search/anime
@@ -813,6 +822,15 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
     });
   }
 
+  // 预算仅覆盖多源检索和跨季扩展；直链、收藏、命中缓存保持原快速路径。
+  const searchBudgetMs = globals.searchTimeoutMs || 18000;
+  const searchDeadline = Date.now() + searchBudgetMs;
+  const fallbackSources = resolveSearchFallbackSources(globals.sourceOrderArr, globals.sourceFallbackOrderArr);
+  const primaryDeadline = fallbackSources.length > 0
+    ? Date.now() + Math.floor(searchBudgetMs / 2)
+    : searchDeadline;
+  let searchIncomplete = false;
+
   try {
     // 根据 sourceOrderArr 动态构建逐源管道：每个源形成独立的 search → handleAnimes 流水线
     log("info", `[system] [LogVar-API] Search sourceOrderArr: ${globals.sourceOrderArr}`);
@@ -821,7 +839,7 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
     const resultData = {};
 
     const activeSearchOrder = [...globals.sourceOrderArr];
-    await executeSearchPipelines(
+    searchIncomplete = await executeSearchPipelines(
       globals.sourceOrderArr,
       queryTitle,
       querySeason,
@@ -829,14 +847,14 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
       preferSource,
       resultData,
       curAnimes,
-      requestAnimeDetailsMap
+      requestAnimeDetailsMap,
+      primaryDeadline
     );
 
     // 主源全部无结果时再启动兜底，避免正常请求重复抓取相同平台。
-    const fallbackSources = resolveSearchFallbackSources(globals.sourceOrderArr, globals.sourceFallbackOrderArr);
     if (curAnimes.length === 0 && fallbackSources.length > 0) {
       log("warn", `[system] [searchAnime] 主搜索源无结果，启用兜底源: ${fallbackSources.join(',')}`);
-      await executeSearchPipelines(
+      const fallbackIncomplete = await executeSearchPipelines(
         fallbackSources,
         queryTitle,
         querySeason,
@@ -844,14 +862,11 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
         preferSource,
         resultData,
         curAnimes,
-        requestAnimeDetailsMap
+        requestAnimeDetailsMap,
+        searchDeadline
       );
+      searchIncomplete ||= fallbackIncomplete;
       activeSearchOrder.push(...fallbackSources);
-    }
-
-    // 缓存首季/默认请求结果，剥离附加链接
-    if (curAnimes.length > 0) {
-      setSearchCache(cacheKey, curAnimes.map(({ links, ...pureAnime }) => pureAnime), requestAnimeDetailsMap);
     }
 
     // 判断当前获取的季度是否已包含用户指定的集数
@@ -883,7 +898,7 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
         // 依据 bangumi-data 的 TMDB 季边界定位目标集所在季, 跨季扩展直接收敛至目标季并跳过无关中间季, 集数扣减交由 findCrossSeasonEpisodeMap 借 TMDB 边界完成
         let targetSeasons = [];
         if (globals.useBangumiData && queryEpisode) {
-          tmdbSeasonBoundaries = await getTmdbSeasonBoundaries(queryTitle);
+          tmdbSeasonBoundaries = await runWithRequestBudget(searchDeadline - Date.now(), () => getTmdbSeasonBoundaries(queryTitle));
           if (tmdbSeasonBoundaries && tmdbSeasonBoundaries.length >= 2) {
             for (let i = tmdbSeasonBoundaries.length - 1; i >= 0; i--) {
               const b = tmdbSeasonBoundaries[i];
@@ -904,27 +919,45 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
           // 在PLATFORM_ORDER模式下，跳过已满足平台的对应源；unsatisfied为空时不跳过
           if (targetPlatform && unsatisfiedPlatforms.size > 0 && !unsatisfiedPlatforms.has(source)) continue;
           // 源间并发、源内顺序，防止同源并发导致模块级缓存竞态
-          expandPromises.push((async () => {
+          expandPromises.push(runWithRequestBudget(searchDeadline - Date.now(), async () => {
             const sourceResults = [];
             for (let s = expansionStart; s <= expansionEnd; s++) {
+              throwIfRequestCancelled();
               const seasonAnimes = [];
-              await executeSourceHandlers({ [source]: resultData[source] }, queryTitle, seasonAnimes, requestAnimeDetailsMap, s, preferAnimeId, preferSource, [source]);
-              if (seasonAnimes.length > 0) {
-                setSearchCache(`${queryTitle}_S${s}`, seasonAnimes.map(({ links, ...pureAnime }) => pureAnime), requestAnimeDetailsMap);
-              }
-              sourceResults.push(seasonAnimes);
+              const failed = await executeSourceHandlers({ [source]: resultData[source] }, queryTitle, seasonAnimes, requestAnimeDetailsMap, s, preferAnimeId, preferSource, [source]);
+              searchIncomplete ||= failed;
+              sourceResults.push({ season: s, animes: seasonAnimes });
             }
             return sourceResults;
-          })());
+          }));
         }
-        const expandedResults = (await Promise.all(expandPromises)).flat();
-        for (const res of expandedResults) {
-          curAnimes.push(...res);
+        const expansionResults = await Promise.allSettled(expandPromises);
+        searchIncomplete ||= expansionResults.some(result => result.status === 'rejected');
+        const seasonResults = new Map();
+        for (const result of expansionResults) {
+          if (result.status !== 'fulfilled') continue;
+          for (const { season, animes } of result.value) {
+            curAnimes.push(...animes);
+            const combined = seasonResults.get(season) || [];
+            combined.push(...animes);
+            seasonResults.set(season, combined);
+          }
+        }
+        if (!searchIncomplete) {
+          for (const [season, animes] of seasonResults) {
+            if (animes.length > 0) setSearchCache(`${queryTitle}_S${season}`, animes.map(({ links, ...pureAnime }) => pureAnime), requestAnimeDetailsMap);
+          }
         }
       }
     }
   } catch (error) {
+    searchIncomplete = true;
     log("error", "[system] [LogVar-API] 发生错误:", error);
+  }
+
+  // 不完整搜索不写入也不删除缓存，避免覆盖并发请求已经取得的完整结果。
+  if (searchIncomplete) {
+    log('warn', '[system] [searchAnime] 搜索未完整完成，返回已完成源并跳过搜索缓存');
   }
 
   // 执行源合并逻辑（支持常规配对组和自定义规则表触发）
@@ -993,18 +1026,20 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
     const responseAnimes = curAnimes.map(({ links, ...pureAnime }) => pureAnime);
 
     // 缓存搜索结果
-    if (responseAnimes.length > 0) {
+    if (responseAnimes.length > 0 && !searchIncomplete) {
       const cacheKey = querySeason !== null ? `${queryTitle}_S${querySeason}` : queryTitle;
       setSearchCache(cacheKey, responseAnimes, requestAnimeDetailsMap);
     }
 
+    const unavailable = searchIncomplete && responseAnimes.length === 0;
     return jsonResponse({
-      errorCode: 0,
-      success: true,
-      errorMessage: "",
+      errorCode: unavailable ? 503 : 0,
+      success: !unavailable,
+      errorMessage: unavailable ? '搜索源未能完整响应，请稍后重试' : '',
       animes: responseAnimes,
       tmdbSeasonBoundaries,
-    });
+      searchIncomplete,
+    }, unavailable ? 503 : 200);
 
 }
 
@@ -2192,7 +2227,10 @@ export async function searchEpisodes(url) {
   const searchRes = await searchAnime(searchUrl, null, null, requestAnimeDetailsMap);
   const searchData = await searchRes.json();
 
-  if (!searchData.success || !searchData.animes || searchData.animes.length === 0) {
+  if (!searchData.success) {
+    return jsonResponse({ ...searchData, hasMore: false }, searchRes.status);
+  }
+  if (!searchData.animes || searchData.animes.length === 0) {
     log("info", "[system] [episodes] No anime found for the given title");
     return jsonResponse({
       errorCode: 0,
@@ -2267,7 +2305,8 @@ export async function searchEpisodes(url) {
     errorCode: 0,
     success: true,
     errorMessage: "",
-    animes: resultAnimes
+    animes: resultAnimes,
+    searchIncomplete: searchData.searchIncomplete === true
   });
 }
 

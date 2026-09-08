@@ -3,6 +3,7 @@ import { log } from './log-util.js'
 import { AsyncLocalStorage } from 'node:async_hooks';
 import https from 'node:https';
 import http from 'node:http';
+import { requestBudgetContext, throwIfRequestCancelled, waitForRequestDelay } from './request-budget-util.js';
 
 // 跨异步生命周期链路的日志上下文追踪器
 export const sourceLogContext = new AsyncLocalStorage();
@@ -93,6 +94,7 @@ function shouldUseNodeFetch() {
 }
 
 export async function httpGet(url, options = {}) {
+  throwIfRequestCancelled(options.signal);
   // 单次搜索请求内 HTTP 响应复用: 若当前请求上下文已激活复用缓存且本 URL 已缓存, 直接返回克隆结果, 跳过重复网络请求
   const requestHttpCache = httpCacheContext.getStore();
   // 重试调用传入 bypassCache 时跳过复用，避免复用首次已缓存的失败响应而令重试被静默吞掉
@@ -113,6 +115,7 @@ export async function httpGet(url, options = {}) {
 
   // 执行请求，包含重试逻辑
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    throwIfRequestCancelled(options.signal);
     // 获取当前异步生命周期的源标识
     const currentSource = sourceLogContext.getStore() || "system";
 
@@ -121,9 +124,9 @@ export async function httpGet(url, options = {}) {
       // 针对网络层物理阻断（如 ETIMEDOUT, ECONNRESET, AbortError）取消长退避，实现快速重试
       // 常规服务端报错（如 502, 429）保持指数退避逻辑
       if (lastError && (lastError.cause?.code === 'ETIMEDOUT' || lastError.cause?.code === 'ECONNRESET' || lastError.name === 'AbortError')) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await waitForRequestDelay(100, options.signal);
       } else {
-        await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, attempt - 1), 5000)));
+        await waitForRequestDelay(Math.min(1000 * Math.pow(2, attempt - 1), 5000), options.signal);
       }
     } else {
       log("info", `[${currentSource}] [请求模拟] HTTP GET: ${url}`);
@@ -136,6 +139,7 @@ export async function httpGet(url, options = {}) {
 
     // 链接外部中断信号并获取清理函数
     const cleanupSignal = linkSignal(options.signal, controller);
+    const cleanupBudget = linkSignal(requestBudgetContext.getStore()?.signal, controller);
 
     try {
       // 兼容iOS巨魔或旧版Node：使用node-fetch替代内置fetch
@@ -162,8 +166,6 @@ export async function httpGet(url, options = {}) {
           redirect: allow_redirects ? 'follow' : 'manual'
         });
       }
-
-      clearTimeout(timeoutId);
 
       // 非 2xx 且不在白名单内的状态码抛出异常
       if (!response.ok && !validStatusCodes.includes(response.status)) {
@@ -240,6 +242,7 @@ export async function httpGet(url, options = {}) {
         }
       }
 
+      throwIfRequestCancelled(options.signal);
       let parsedData;
       try {
         parsedData = JSON.parse(data);  // 尝试将文本解析为 JSON
@@ -288,7 +291,7 @@ export async function httpGet(url, options = {}) {
       const currentSource = sourceLogContext.getStore() || "system";
 
       // 如果是外部信号导致的中断，停止重试并直接抛出
-      if (options.signal?.aborted) {
+      if (options.signal?.aborted || requestBudgetContext.getStore()?.signal.aborted) {
         throw error;
       }
 
@@ -318,7 +321,9 @@ export async function httpGet(url, options = {}) {
         continue;
       }
     } finally {
-      // 请求生命周期结束，释放监听器内存引用
+      // 必须覆盖响应体读取，不能在仅收到响应头时清除超时计时器。
+      clearTimeout(timeoutId);
+      cleanupBudget();
       cleanupSignal();
     }
   }
@@ -330,6 +335,7 @@ export async function httpGet(url, options = {}) {
 }
 
 export async function httpPost(url, body, options = {}) {
+  throwIfRequestCancelled(options.signal);
   const logUrl = options.redactUrl === true
     ? `${String(url).split('?')[0]}?[redacted]`
     : url;
@@ -340,6 +346,7 @@ export async function httpPost(url, body, options = {}) {
 
   // 执行请求，包含重试逻辑
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    throwIfRequestCancelled(options.signal);
     const currentSource = sourceLogContext.getStore() || "system";
 
     if (attempt > 0) {
@@ -347,9 +354,9 @@ export async function httpPost(url, body, options = {}) {
       // 针对网络层物理阻断（如 ETIMEDOUT, ECONNRESET, AbortError）取消长退避，实现快速重试
       // 常规服务端报错（如 502, 429）保持指数退避逻辑
       if (lastError && (lastError.cause?.code === 'ETIMEDOUT' || lastError.cause?.code === 'ECONNRESET' || lastError.name === 'AbortError')) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await waitForRequestDelay(100, options.signal);
       } else {
-        await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, attempt - 1), 5000)));
+        await waitForRequestDelay(Math.min(1000 * Math.pow(2, attempt - 1), 5000), options.signal);
       }
     } else {
       log("info", `[${currentSource}] [请求模拟] HTTP POST: ${logUrl}`);
@@ -362,6 +369,7 @@ export async function httpPost(url, body, options = {}) {
 
     // 链接外部中断信号并获取清理函数
     const cleanupSignal = linkSignal(options.signal, controller);
+    const cleanupBudget = linkSignal(requestBudgetContext.getStore()?.signal, controller);
 
     // 处理请求头、body 和其他参数
     const { headers = {}, params, allow_redirects = true } = options;
@@ -389,9 +397,8 @@ export async function httpPost(url, body, options = {}) {
         response = await fetch(url, fetchOptions);
       }
 
-      clearTimeout(timeoutId);
-
       const data = await response.text();
+      throwIfRequestCancelled(options.signal);
 
       if (!response.ok && !validStatusCodes.includes(response.status)) {
         log("error", `[${currentSource}] [请求模拟] response data: `, data);
@@ -423,7 +430,7 @@ export async function httpPost(url, body, options = {}) {
       const currentSource = sourceLogContext.getStore() || "system";
 
       // 如果是外部信号导致的中断，停止重试并直接抛出
-      if (options.signal?.aborted) {
+      if (options.signal?.aborted || requestBudgetContext.getStore()?.signal.aborted) {
         throw error;
       }
 
@@ -453,7 +460,8 @@ export async function httpPost(url, body, options = {}) {
         continue;
       }
     } finally {
-      // 请求生命周期结束，释放监听器内存引用
+      clearTimeout(timeoutId);
+      cleanupBudget();
       cleanupSignal();
     }
   }
@@ -754,6 +762,7 @@ export function getPathname(url) {
  * @returns {Promise<any>} 返回 JSON 数据或 null (被中断时)
  */
 export async function httpGetWithStreamCheck(url, options = {}, checkCallback) {
+  throwIfRequestCancelled(options.signal);
   const { headers = {}, sniffLimit } = options;
   // 默认限制为 32KB
   const SNIFF_LIMIT = parseInt(sniffLimit || '32768', 10) || 32768;
@@ -764,6 +773,7 @@ export async function httpGetWithStreamCheck(url, options = {}, checkCallback) {
 
   // 链接外部中断信号并获取清理函数
   const cleanupSignal = linkSignal(options.signal, controller);
+  const cleanupBudget = linkSignal(requestBudgetContext.getStore()?.signal, controller);
 
   try {
     const currentSource = sourceLogContext.getStore() || "system";
@@ -877,6 +887,8 @@ export async function httpGetWithStreamCheck(url, options = {}, checkCallback) {
     return null;
   } finally {
     // 流式请求执行完毕或被熔断拦截，释放监听器内存引用
+    clearTimeout(timeoutId);
+    cleanupBudget();
     cleanupSignal();
   }
 }

@@ -240,6 +240,11 @@ async function refreshFavoriteResolved(fileName, requestedKeyword, url) {
     const searchUrl = buildFavoriteSearchUrl(url, title, season, episode);
     const searchResponse = await searchAnime(searchUrl, null, null, detailsMap, null, true);
     const searchData = await searchResponse.json();
+    if (searchData?.searchIncomplete) {
+      const error = new Error('刷新失败：搜索源未完整响应，保留原收藏');
+      error.status = 503;
+      throw error;
+    }
     if (!searchData?.success || !Array.isArray(searchData.animes) || searchData.animes.length === 0) {
       const error = new Error('刷新失败：未找到该剧集搜索结果');
       error.status = 404;

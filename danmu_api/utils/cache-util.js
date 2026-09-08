@@ -3,6 +3,7 @@ import { log } from './log-util.js'
 import { Anime } from "../models/dandan-model.js";
 import { simpleHash } from "./codec-util.js";
 import { loadFavorites, resolveFavoriteForSearchKeyword, saveFavorites } from "./favorite-util.js";
+import { throwIfRequestCancelled } from './request-budget-util.js';
 let fs, path;
 
 // =====================
@@ -337,6 +338,7 @@ export function getSearchCache(keyword, detailsMap = null) {
 
 // 设置搜索缓存
 export function setSearchCache(keyword, results, detailsMap = null) {
+    throwIfRequestCancelled();
     const details = collectUniqueAnimeDetails(detailsMap);
 
     // 写入前先清理所有过期条目
@@ -418,6 +420,7 @@ export function setCommentCache(videoUrl, comments) {
 
 // 添加元素到 episodeIds：检查 url 是否存在，若不存在则以自增 id 添加
 export function addEpisode(url, title) {
+    throwIfRequestCancelled();
     // 检查是否已存在相同的 url 和 title
     const existingEpisode = globals.episodeIds.find(episode => episode.url === url && episode.title === title);
     if (existingEpisode) {
@@ -517,6 +520,7 @@ export function findAnimeTitleById(id) {
 
 // 添加 anime 对象到 animes，并将其 links 添加到 episodeIds
 export function addAnime(anime, detailStore = null) {
+    throwIfRequestCancelled();
     anime = Anime.fromJson(anime);
     try {
         // 确保 anime 有 links 属性且是数组
@@ -583,6 +587,7 @@ export function addAnime(anime, detailStore = null) {
 }
 // 删除最早添加的 anime，并从 episodeIds 删除其 links 中的 url
 export function removeEarliestAnime() {
+    throwIfRequestCancelled();
     if (globals.animes.length === 0) {
         log("error", "[cache] No animes to remove.");
         return false;
