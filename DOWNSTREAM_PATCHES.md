@@ -22,6 +22,8 @@ This fork follows `huangxd-/danmu_api:main` as its architectural baseline. Local
 | SEARCH-001 | HTTP body deadlines and bounded server search | Body reads remain time-limited; stalled search/handler/season tasks cannot hold healthy results, start late requests or mutate shared anime caches; fallback retains a budget; incomplete results cannot replace complete search caches or favorites | `search-reliability.test.js`: body stalls, retry cancellation, source isolation, fallback reservation, late writes, complete ordering, episode 20, cross-season timeout and favorite preservation | Upstream supplies equivalent deadline, cancellation and cache-integrity guarantees; retain regressions when retiring this patch |
 | COLOR-001 | Color and gradient conversion | Keep upstream color semantics while ensuring bounded, smooth gradients and preserving native `color_v2` values | Gradient smoothness, bounds and native-color preservation tests | Upstream implementation passes the same conversion invariants |
 | HONGGUO-001 | Hongguo detail and fallback reliability | Preserve complete application details and use a bounded web fallback without discarding valid data | Hongguo complete-detail and bounded-fallback tests | Upstream covers the same completeness and fallback behavior |
+| FORWARD-001 | Standalone widget build | Server-local storage and XML parser dependencies must not enter the standalone widget; server uploads remain available through the API | `forward/bundle-smoke.test.js`: bundle executes without Node globals, exports player entrypoints and skips server-local lookup | Upstream supplies an equivalent standalone build boundary |
+| LOCAL-001 | Optional cloud local-danmu reads | A cloud deployment without Redis skips local lookups without issuing network requests | `worker.test.js`: cloud without Redis skips optional local lookup | Upstream applies equivalent storage-readiness guards |
 
 ## Upstream review checklist
 
@@ -34,3 +36,17 @@ For every upstream integration Draft PR:
 - require Docker validation and a Ready Vercel Preview;
 - verify representative behavior without reading or exposing credentials;
 - merge into `main` only after explicit owner confirmation.
+
+## v1.21.1 integration review
+
+Reviewed upstream range: `28673ac..ea88a15a7a1990cb62a2dbaf637061f6a4249679`. Full review and release gates: [UPSTREAM_REVIEW_v1.21.1.md](UPSTREAM_REVIEW_v1.21.1.md).
+
+- MATCH-001: adapted. Preserve main-episode preference and offsets; incorporate sparse local episode numbers and the upstream FongMi season fix.
+- AUTH-001: retained. New upload, DELETE and PATCH routes use the upstream administrator gate; PATCH denial is covered for both API prefixes.
+- CACHE-001: retained. Local upload/edit/delete invalidate transient search/comment caches; existing favorite protection remains covered.
+- SOURCE-001: adapted. Register `local` with lazy initialization and explicit direct-comment capability.
+- PERF-001: adapted/reduced. Use upstream cna fallback and empty-result helper; retain worker pool, header compatibility, finite token requests and credential-safe logging.
+- SEARCH-001: retained. Upstream does not replace request-budget isolation or incomplete-cache protection.
+- COLOR-001: retained. Adopt upstream local XML parsing fix while retaining smooth gradients and native colors.
+- HONGGUO-001: retained; no overlapping upstream changes.
+- FORWARD-001 and LOCAL-001: added for demonstrated integration regressions.

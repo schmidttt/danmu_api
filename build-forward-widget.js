@@ -48,6 +48,21 @@ const forwardRuntimeCompatPlugin = {
   setup(build) {
     const danAnyModulePath = path.resolve('danmu_api/utils/dan-any.js');
 
+    // Uploaded files belong to the server. The standalone widget has neither
+    // its filesystem nor its Redis configuration; keep this optional source empty.
+    build.onResolve({ filter: /(?:^|[\\/])local\.js$/ }, (args) => {
+      if (path.resolve(args.resolveDir, args.path) !== path.resolve('danmu_api/sources/local.js')) return;
+      return { path: path.resolve('forward/local-source.js') };
+    });
+    build.onResolve({ filter: /(?:^|[\\/])local-danmu-store\.js$/ }, (args) => {
+      if (path.resolve(args.resolveDir, args.path) !== path.resolve('danmu_api/utils/local-danmu-store.js')) return;
+      return { path: 'local-danmu-store', namespace: 'forward-optional-modules' };
+    });
+    build.onLoad({ filter: /^local-danmu-store$/, namespace: 'forward-optional-modules' }, () => ({
+      loader: 'js',
+      contents: `export async function findLocalDanmu() { return null; }`
+    }));
+
     // Forward only consumes the native JSON/XML response paths. Keep dan-any
     // available to the server while removing it and its transitive dependencies
     // from the standalone widget bundle.
