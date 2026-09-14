@@ -36,6 +36,7 @@ import AiyifanSource from './aiyifan.js';
 import HongguoSource from './hongguo.js';
 import AnimekoSource from './animeko.js';
 import OtherSource from './other.js';
+import LocalSource from './local.js';
 
 // 源注册表：每条记录描述一个源的调度身份与实例化方式。
 // 字段说明：
@@ -88,6 +89,7 @@ const SOURCE_REGISTRY = [
   { key: 'aiyifan',   logName: '',        factory: () => new AiyifanSource(), deps: [], canMerge: true },
   { key: 'hongguo',   logName: '',        factory: () => new HongguoSource(), deps: [], canMerge: true, canDirect: true },
   { key: 'animeko',   logName: '',        factory: () => new AnimekoSource(), deps: [], canMerge: true, canDirect: true },
+  { key: 'local',     logName: 'local',   factory: () => new LocalSource(), deps: [], canDirect: true },
   { key: 'other',     logName: '',        factory: () => new OtherSource(), deps: [], canSearch: false, canHandle: false },
 ];
 

@@ -47,7 +47,50 @@ function readHeader(headers, name) {
   return entry ? entry[1] : null;
 }
 
+/**
+ * 生成本地兜底 cna。
+ * 优酷弹幕接口只把 cna 当作请求体里的客户端标识（guid）回传，不校验其来源，
+ * mmstat 域名被广告过滤/私人 DNS 拦截时可用本地生成值代替（详见 getEpisodeDanmuSegments）。
+ */
+function generateLocalCna() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = new Uint8Array(24);
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  let cna = '';
+  for (const byte of bytes) {
+    cna += chars[byte % chars.length];
+  }
+  return cna;
+}
+
 export default class YoukuSource extends BaseSource {
+  constructor() {
+    super();
+    // mmstat 取 cna 失败后置为 true，后续请求直接复用本地 cna，避免每次都等待失败请求超时
+    this._useFallbackCna = false;
+    this._fallbackCna = null;
+  }
+
+  _getFallbackCna() {
+    if (!this._fallbackCna) {
+      this._fallbackCna = generateLocalCna();
+    }
+    return this._fallbackCna;
+  }
+
+  _emptySegmentList() {
+    return new SegmentListResponse({
+      "type": "youku",
+      "segmentList": []
+    });
+  }
+
   convertYoukuUrl(url) {
     // 使用正则表达式提取 vid 参数
     const vidMatch = url.match(/vid=([^&]+)/);
@@ -482,16 +525,18 @@ export default class YoukuSource extends BaseSource {
     log("info", "[youku] 获取优酷弹幕分段列表...", id);
 
     if (!id) {
-      return new SegmentListResponse({
-        "type": "youku",
-        "segmentList": []
-      });
+      return this._emptySegmentList();
     }
 
     // 处理302场景
     // https://v.youku.com/video?vid=XNjQ4MTIwOTE2NA==&tpa=dW5pb25faWQ9MTAyMjEzXzEwMDAwNl8wMV8wMQ需要转成https://v.youku.com/v_show/id_XNjQ4MTIwOTE2NA==.html
     if (id.includes("youku.com/video?vid")) {
         id = this.convertYoukuUrl(id);
+    }
+
+    if (!id) {
+      log("error", "[youku] Invalid URL");
+      return this._emptySegmentList();
     }
 
     // 弹幕和视频信息 API 基础地址
@@ -509,10 +554,7 @@ export default class YoukuSource extends BaseSource {
       log("info", "[youku]", path);
     } else {
       log("error", "[youku] Invalid URL");
-      return new SegmentListResponse({
-        "type": "youku",
-        "segmentList": []
-      });
+      return this._emptySegmentList();
     }
     const video_id = path[path.length - 1].split(".")[0].slice(3);
 
@@ -531,42 +573,61 @@ export default class YoukuSource extends BaseSource {
       });
     } catch (error) {
       log("error", "[youku] 请求视频信息失败:", error);
-      return new SegmentListResponse({
-        "type": "youku",
-        "segmentList": []
-      });
+      return this._emptySegmentList();
     }
 
-    const data = typeof res.data === "string" ? JSON.parse(res.data) : res.data;
+    let data;
+    try {
+      data = typeof res?.data === "string" ? JSON.parse(res.data) : res?.data;
+    } catch (error) {
+      log("error", "[youku] 视频信息解析失败:", error.message);
+      return this._emptySegmentList();
+    }
+    if (!data) {
+      log("error", "[youku] 视频信息为空");
+      return this._emptySegmentList();
+    }
     const title = data.title;
     const duration = Number(data.duration);
     if (!Number.isFinite(duration) || duration <= 0) {
-      log("error", "[youku] 视频时长无效");
-      return new SegmentListResponse({
-        "type": "youku",
-        "segmentList": []
-      });
+      log("error", `[youku] 视频时长无效: ${data.duration}`);
+      return this._emptySegmentList();
     }
     log("info", `[youku] 标题: ${title}, 时长: ${duration}`);
 
-    // 获取 cna 和 tk_enc
-    let cna, _m_h5_tk_enc, _m_h5_tk;
-    try {
-      const cnaUrl = "https://log.mmstat.com/eg.js";
-      const tkEncUrl = "https://acs.youku.com/h5/mtop.com.youku.aplatform.weakget/1.0/?jsv=2.5.1&appKey=24679788";
-      const cnaRes = await httpGet(cnaUrl, {
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36",
-        },
-        allow_redirects: false
-      });
-      const cnaSetCookie = String(readHeader(cnaRes?.headers, 'set-cookie') || '');
-      const cnaCookieMatch = cnaSetCookie.match(/(?:^|[,;]\s*)cna=([^;]+)/i);
-      const etag = String(readHeader(cnaRes?.headers, 'etag') || '').replace(/^"|"$/g, '');
-      cna = cnaCookieMatch?.[1] || etag;
-      if (!cna) throw new Error('响应中缺少 cna');
+    // 获取 cna：mmstat 域名常被广告过滤/私人 DNS 拦截，
+    // 首次失败后改用本地生成的等价格式 cna 兜底，之后不再请求该域名
+    let cna = null;
+    let _m_h5_tk_enc = null, _m_h5_tk = null;
+    if (this._useFallbackCna) {
+      cna = this._getFallbackCna();
+    } else {
+      try {
+        const cnaUrl = "https://log.mmstat.com/eg.js";
+        const cnaRes = await httpGet(cnaUrl, {
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36",
+          },
+          allow_redirects: false
+        });
+        const cnaSetCookie = String(readHeader(cnaRes?.headers, 'set-cookie') || '');
+        const cnaCookieMatch = cnaSetCookie.match(/(?:^|[,;]\s*)cna=([^;]+)/i);
+        const etag = String(readHeader(cnaRes?.headers, 'etag') || '').trim().replace(/^"|"$/g, '');
+        cna = cnaCookieMatch?.[1] || etag;
+      } catch (error) {
+        log("info", `[youku] 获取 cna 失败，切换本地生成值兜底: ${error.message}`);
+      }
+      if (!cna) {
+        this._useFallbackCna = true;
+        cna = this._getFallbackCna();
+        log("info", "[youku] 使用本地生成 cna 兜底");
+      }
+    }
 
+    // 获取 tk_enc / _m_h5_tk（mtop 签名 token 由服务端下发，无法本地生成）
+    try {
+      const tkEncUrl = "https://acs.youku.com/h5/mtop.com.youku.aplatform.weakget/1.0/?jsv=2.5.1&appKey=24679788";
       const tkEncRes = await httpGet(tkEncUrl, {
         headers: {
           "Content-Type": "application/json",
@@ -732,8 +793,13 @@ export default class YoukuSource extends BaseSource {
         uid: 0,
         content: "",
       };
-      content.timepoint = item.playat / 1000;
-      const prop = JSON.parse(item.propertis)
+      content.timepoint = Number(item.playat) / 1000 || 0;
+      let prop = null;
+      try {
+        prop = item.propertis ? JSON.parse(item.propertis) : null;
+      } catch (error) {
+        log("info", `[youku] 弹幕属性解析失败，已忽略颜色/位置: ${error.message}`);
+      }
       if (prop?.color) {
         content.color = typeof prop.color === 'string' 
           ? parseInt(prop.color, 10) 
@@ -745,7 +811,7 @@ export default class YoukuSource extends BaseSource {
         else if (pos === 2) content.ct = 4;
       }
       content.content = item.content;
-      content.like = item.extFields.voteUp;
+      content.like = item.extFields?.voteUp ?? 0;
       return content;
     });
   }
