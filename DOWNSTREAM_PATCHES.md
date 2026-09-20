@@ -50,3 +50,11 @@ Reviewed upstream range: `28673ac..ea88a15a7a1990cb62a2dbaf637061f6a4249679`. Fu
 - COLOR-001: retained. Adopt upstream local XML parsing fix while retaining smooth gradients and native colors.
 - HONGGUO-001: retained; no overlapping upstream changes.
 - FORWARD-001 and LOCAL-001: added for demonstrated integration regressions.
+
+## v1.21.2 integration review
+
+Reviewed complete upstream range `ea88a15..280b232`. See [UPSTREAM_REVIEW_v1.21.2.md](UPSTREAM_REVIEW_v1.21.2.md).
+
+- MATCH-001: adapted to upstream title normalization; normal and AI matching retain series preference across traditional/simplified titles.
+- LOCAL-001: adapted to metadata-only indexing while retaining the no-Redis read guard.
+- AUTH-001, CACHE-001, SOURCE-001, PERF-001, SEARCH-001, COLOR-001, HONGGUO-001 and FORWARD-001: retained; upstream does not replace their remaining invariants.
