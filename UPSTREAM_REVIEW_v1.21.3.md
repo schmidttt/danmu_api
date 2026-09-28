@@ -26,3 +26,7 @@
 - PR 的 Docker、Node、Vercel Preview 与正式上线结果记于发布交接记录。
 
 回滚基线为 `801ea70503ae78cf6bb9a45718f29b7720bf9cc3`。需要回滚时优先恢复升级前 Vercel 部署，再通过 revert PR 恢复代码，不重置或强推 main。
+
+## Docker 验证适配
+
+首轮 GitHub ARM 模拟构建在 npm install 阶段触发 QEMU Illegal instruction，最终超时取消。改为分别使用 ubuntu-24.04 和 ubuntu-24.04-arm 原生构建并加载镜像检查 worker 导入；不登录或推送镜像。上游 main 的发布条件保持不变。原生 ARM runner 依据 [GitHub 官方文档](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。最终云端结果以 PR 检查为准。
