@@ -58,3 +58,12 @@ Reviewed complete upstream range `ea88a15..280b232`. See [UPSTREAM_REVIEW_v1.21.
 - MATCH-001: adapted to upstream title normalization; normal and AI matching retain series preference across traditional/simplified titles.
 - LOCAL-001: adapted to metadata-only indexing while retaining the no-Redis read guard.
 - AUTH-001, CACHE-001, SOURCE-001, PERF-001, SEARCH-001, COLOR-001, HONGGUO-001 and FORWARD-001: retained; upstream does not replace their remaining invariants.
+
+## v1.21.3 integration review
+
+Reviewed complete upstream range `280b232..fc1b7ff`. See [UPSTREAM_REVIEW_v1.21.3.md](UPSTREAM_REVIEW_v1.21.3.md).
+
+- AUTH-001: adapted. Require explicit administrator access for account verification; keep relay credentials on HTTPS without automatic redirects and escape remote verification messages.
+- SOURCE-001: reduced overlap. Upstream now provides the custom isolated detail-store propagation already retained downstream; lazy initialization, capability validation and failure isolation remain.
+- PERF-001: retained, including bounded Youku concurrency (default 16).
+- MATCH-001, CACHE-001, SEARCH-001, COLOR-001, HONGGUO-001, FORWARD-001 and LOCAL-001: retained; no equivalent upstream replacement in this range.

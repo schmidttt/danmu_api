@@ -1,0 +1,32 @@
+# v1.21.3 上游更新审查
+
+基线 `origin/main=801ea70`（v1.21.2），完整合入 `280b232..fc1b7ff`，保留真实合并历史。用户已授权验证后直接合并上线。
+
+## 上游范围
+
+- `c42877c`：版本 1.21.3；弹弹play改用 NipaPlay 登录中转，支持令牌缓存、续期、关联弹幕分发与原生弹幕回退；增加账号配置和验证界面，保留凭据中的井号并脱敏日志。
+- `fc1b7ff`：custom 源详情处理透传 isolatedDetailStore，修复自动匹配。
+
+已复核全部 15 个上游变更文件。解决 envs、registry、worker.test 三处冲突，同时保留下游和上游回归。
+
+## 下游补丁
+
+- AUTH-001：适配。新账号验证接口必须显式 ADMIN_TOKEN；普通用户和匿名访问不得调用已保存凭据。NipaPlay 登录、续期和评论请求禁止自动转发凭据到重定向地址；不使用上游明文 HTTP 备用网关，仅保留 HTTPS 主线路，失败沿用原生弹幕回退。新验证界面将远端消息作为转义文本显示。
+- SOURCE-001：部分已由上游覆盖。custom 的 isolatedDetailStore 行为与既有下游实现一致；保留惰性构造、能力检查和异常隔离。
+- PERF-001：保留优酷默认并发 16 及 1–16 边界；腾讯分片截止时间不变。
+- MATCH-001、CACHE-001、SEARCH-001、COLOR-001、HONGGUO-001、FORWARD-001、LOCAL-001：保留；本轮上游未替代其剩余保护逻辑。
+
+## 验证与发布边界
+
+- 隔离临时目录 Node 回归 193/193，通过，无跳过；覆盖并发登录复用、401重登、令牌续期、302无凭据转发、重复失败仍使用HTTPS、无账号原生回退、井号密码保留、配置脱敏及管理员允许/普通用户拒绝。
+- Forward 构建及独立运行检查 1/1，通过。
+- 生产升级前版本 1.21.2；旧 NIPAPLAY_REPLACE_DANDAN 为 false。保留现有源顺序、18秒搜索预算、彩色渐变和 Redis 配置，不改环境变量或账号。
+- 新机制需要同时配置 DANDANPLAY_ACCOUNT 和 DANDANPLAY_PASSWORD；未配置时继续使用原生弹幕，旧的匿名关联链接兜底按上游机制移除。
+- 不新增真实账号、不调用真实账号登录。模拟测试不代表第三方账号、播放器或生产 Redis 上传的实测。
+- PR 的 Docker、Node、Vercel Preview 与正式上线结果记于发布交接记录。
+
+回滚基线为 `801ea70503ae78cf6bb9a45718f29b7720bf9cc3`。需要回滚时优先恢复升级前 Vercel 部署，再通过 revert PR 恢复代码，不重置或强推 main。
+
+## Docker 验证适配
+
+首轮 GitHub ARM 模拟构建在 npm install 阶段触发 QEMU Illegal instruction，最终超时取消。改为分别使用 ubuntu-24.04 和 ubuntu-24.04-arm 原生构建并加载镜像检查 worker 导入；不登录或推送镜像。上游 main 的发布条件保持不变。原生 ARM runner 依据 [GitHub 官方文档](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。最终云端结果以 PR 检查为准。

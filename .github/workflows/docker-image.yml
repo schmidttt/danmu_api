@@ -17,9 +17,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  validate:
+    # Validate each architecture natively; QEMU can SIGILL during Alpine Node installs.
+    if: github.event_name != 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build Docker image without publishing
+        run: |
+          docker buildx build --platform ${{ matrix.platform }} \
+            -t danmu-api:validation --load .
+      - name: Smoke-test image imports
+        run: docker run --rm --entrypoint node danmu-api:validation --input-type=module -e "await import('./danmu_api/worker.js')"
+
   build:
-    # PRs validate the image without secrets. Publishing is limited to upstream main.
-    if: github.event_name != 'push' || github.repository == 'huangxd-/danmu_api'
+    # Publishing remains limited to upstream main; fork PRs use native validation above.
+    if: github.event_name == 'push' && github.repository == 'huangxd-/danmu_api'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -65,14 +90,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-
-      # PR 构建不登录、不推送，避免 fork 因无法读取 secrets 而失败
-      - name: Build Docker image without publishing
-        if: github.event_name != 'push'
-        run: |
-          docker buildx build --platform linux/amd64,linux/arm64 \
-            -t danmu-api:${{ env.VERSION_TAG }} \
-            --output=type=oci,dest=/tmp/danmu-api.tar .
 
       - name: Build and Push Docker image
         if: github.event_name == 'push' && github.repository == 'huangxd-/danmu_api'
