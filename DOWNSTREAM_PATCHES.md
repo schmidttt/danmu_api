@@ -22,7 +22,6 @@ This fork follows `huangxd-/danmu_api:main` as its architectural baseline. Local
 | SEARCH-001 | HTTP body deadlines and bounded server search | Body reads remain time-limited; stalled search/handler/season tasks cannot hold healthy results, start late requests or mutate shared anime caches; fallback retains a budget; incomplete results cannot replace complete search caches or favorites | `search-reliability.test.js`: body stalls, retry cancellation, source isolation, fallback reservation, late writes, complete ordering, episode 20, cross-season timeout and favorite preservation | Upstream supplies equivalent deadline, cancellation and cache-integrity guarantees; retain regressions when retiring this patch |
 | COLOR-001 | Color and gradient conversion | Keep upstream color semantics while ensuring bounded, smooth gradients and preserving native `color_v2` values | Gradient smoothness, bounds and native-color preservation tests | Upstream implementation passes the same conversion invariants |
 | HONGGUO-001 | Hongguo detail and fallback reliability | Preserve complete application details and use a bounded web fallback without discarding valid data | Hongguo complete-detail and bounded-fallback tests | Upstream covers the same completeness and fallback behavior |
-| FORWARD-001 | Standalone widget build | Server-local storage and XML parser dependencies must not enter the standalone widget; server uploads remain available through the API | `forward/bundle-smoke.test.js`: bundle executes without Node globals, exports player entrypoints and skips server-local lookup | Upstream supplies an equivalent standalone build boundary |
 | LOCAL-001 | Optional cloud local-danmu reads | A cloud deployment without Redis skips local lookups without issuing network requests | `worker.test.js`: cloud without Redis skips optional local lookup | Upstream applies equivalent storage-readiness guards |
 
 ## Upstream review checklist
@@ -67,3 +66,12 @@ Reviewed complete upstream range `280b232..fc1b7ff`. See [UPSTREAM_REVIEW_v1.21.
 - SOURCE-001: reduced overlap. Upstream now provides the custom isolated detail-store propagation already retained downstream; lazy initialization, capability validation and failure isolation remain.
 - PERF-001: retained, including bounded Youku concurrency (default 16).
 - MATCH-001, CACHE-001, SEARCH-001, COLOR-001, HONGGUO-001, FORWARD-001 and LOCAL-001: retained; no equivalent upstream replacement in this range.
+
+## v1.21.4 integration review
+
+Reviewed complete upstream range `fc1b7ff..afc8b81` (7 commits, 25 changed files). See [UPSTREAM_REVIEW_v1.21.4.md](UPSTREAM_REVIEW_v1.21.4.md).
+
+- CACHE-001: reduced overlap. Adopt upstream independent cache backends, read-before-write protection, unified restoration, episode ID safeguards and selective persistence; retain favorite isolation regressions.
+- SEARCH-001: adapted. Keep bounded pipelines and incomplete-result protection; propagate upstream allocation errors and enforce cancellation inside the new allocation helper.
+- FORWARD-001: retired implementation. Upstream now supplies the equivalent server-storage build boundary; retain standalone regressions and remove the unused local build substitute.
+- MATCH-001, AUTH-001, SOURCE-001, PERF-001, COLOR-001, HONGGUO-001 and LOCAL-001: retained; administrator enforcement, HTTPS relay restrictions and no-Redis cloud lookup guard remain.
