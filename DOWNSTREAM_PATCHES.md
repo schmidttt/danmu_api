@@ -75,3 +75,13 @@ Reviewed complete upstream range `fc1b7ff..afc8b81` (7 commits, 25 changed files
 - SEARCH-001: adapted. Keep bounded pipelines and incomplete-result protection; propagate upstream allocation errors and enforce cancellation inside the new allocation helper.
 - FORWARD-001: retired implementation. Upstream now supplies the equivalent server-storage build boundary; retain standalone regressions and remove the unused local build substitute.
 - MATCH-001, AUTH-001, SOURCE-001, PERF-001, COLOR-001, HONGGUO-001 and LOCAL-001: retained; administrator enforcement, HTTPS relay restrictions and no-Redis cloud lookup guard remain.
+
+## v1.21.5 integration review
+
+Reviewed complete upstream range `afc8b81..f47b786` (11 commits, 72 changed paths). See [UPSTREAM_REVIEW_v1.21.5.md](UPSTREAM_REVIEW_v1.21.5.md).
+
+- AUTH-001: adapted. Preserve HTTPS and no-redirect relay behavior for the new detail fallback, with credential fixture coverage.
+- MATCH-001: retained while adopting upstream title, mapping, year and dub-version fixes.
+- CACHE-001, SOURCE-001, PERF-001, SEARCH-001, COLOR-001, HONGGUO-001 and LOCAL-001: retained; no equivalent upstream replacement.
+- Accept upstream modular tests; preserve 26 added/enhanced downstream cases and bounded-search regressions. Use serial, explicit offline test discovery and isolated favorite fixtures.
+- Fork Sync conflict reporting remains a release safety gate; manually resolve this update and verify a successful no-change run after release.
