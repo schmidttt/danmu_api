@@ -85,3 +85,12 @@ Reviewed complete upstream range `afc8b81..f47b786` (11 commits, 72 changed path
 - CACHE-001, SOURCE-001, PERF-001, SEARCH-001, COLOR-001, HONGGUO-001 and LOCAL-001: retained; no equivalent upstream replacement.
 - Accept upstream modular tests; preserve 26 added/enhanced downstream cases and bounded-search regressions. Use serial, explicit offline test discovery and isolated favorite fixtures.
 - Fork Sync conflict reporting remains a release safety gate; manually resolve this update and verify a successful no-change run after release.
+
+## v1.21.6 integration review
+
+Reviewed complete upstream range `f47b786..5ef63a0` (8 commits, 25 changed paths). See [UPSTREAM_REVIEW_v1.21.6.md](UPSTREAM_REVIEW_v1.21.6.md).
+
+- PERF-001: adapted. Adopt Tencent title/duration fixes and avoid extra duration requests for ordinary comments; retain the overall shard deadline and Youku worker pool.
+- COLOR-001: adapted. Adopt unsuppressed-comment time sorting and protobuf field-tag fixes; retain smooth gradients and native colors.
+- MATCH-001, AUTH-001, CACHE-001, SOURCE-001, SEARCH-001, HONGGUO-001 and LOCAL-001: retained; upstream does not replace their remaining guarantees.
+- Adopt the upstream theme/proxy changes while retaining masked-endpoint and escaped-verification protections. Add loopback-only POST-byte and upstream-reset proxy regressions; preserve explicit serial offline test discovery and native Docker validation.
