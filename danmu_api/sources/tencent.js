@@ -22,6 +22,7 @@ const TENCENT_REQUEST_HEADERS = {
 export async function fetchTencentDanmuSegments(segmentList, {
   request = httpGet,
   deadlineMs = DEFAULT_TENCENT_DANMU_DEADLINE_MS,
+  concurrency = 100,
 } = {}) {
   const effectiveDeadlineMs = Number.isFinite(Number(deadlineMs)) && Number(deadlineMs) > 0
     ? Number(deadlineMs)
@@ -31,23 +32,29 @@ export async function fetchTencentDanmuSegments(segmentList, {
   let timedOut = false;
   let timeoutId;
 
-  const requests = segmentList.map((segment, index) => Promise.resolve()
-    .then(() => request(segment.url, {
-      headers: TENCENT_REQUEST_HEADERS,
-      retries: 1,
-      timeout: effectiveDeadlineMs,
-      signal: controller.signal,
-    }))
-    .then(
-      value => ({ status: "fulfilled", value }),
-      reason => ({ status: "rejected", reason })
-    )
-    .then(result => {
-      settledResults[index] = result;
-      return result;
-    }));
-
-  const allSettled = Promise.all(requests);
+  const limit = Math.max(1, Math.min(Math.floor(Number(concurrency)) || 100, 200));
+  const allSettled = (async () => {
+    for (let batchStart = 0; batchStart < segmentList.length && !controller.signal.aborted; batchStart += limit) {
+      const batch = segmentList.slice(batchStart, batchStart + limit);
+      await Promise.all(batch.map(async (segment, batchIndex) => {
+        const index = batchStart + batchIndex;
+        if (controller.signal.aborted) return;
+        let result;
+        try {
+          const value = await request(segment.url, {
+            headers: TENCENT_REQUEST_HEADERS,
+            retries: 1,
+            timeout: effectiveDeadlineMs,
+            signal: controller.signal,
+          });
+          result = { status: "fulfilled", value, index };
+        } catch (reason) {
+          result = { status: "rejected", reason, index };
+        }
+        settledResults[index] = result;
+      }));
+    }
+  })();
   const deadlineReached = new Promise(resolve => {
     timeoutId = setTimeout(() => {
       timedOut = true;
@@ -819,40 +826,28 @@ export default class TencentSource extends BaseSource {
     const segmentList = segmentResult.segmentList;
     log("info", `[tencent] 弹幕分段数量: ${segmentList.length}`);
 
-    // 解析弹幕数据
-    let contents = [];
-    try {
-      const { results, timedOut, total } = await fetchTencentDanmuSegments(segmentList, {
-        deadlineMs: globals.tencentDanmuDeadlineMs,
-      });
-      const fulfilledCount = results.filter(result => result.status === "fulfilled").length;
-      const failedCount = total - fulfilledCount;
-
-      if (timedOut) {
-        log("warn", `[tencent] 弹幕分片整体等待达到 ${globals.tencentDanmuDeadlineMs}ms 截止时间，已返回 ${fulfilledCount}/${total} 个成功分片`);
-      } else if (failedCount > 0) {
-        log("warn", `[tencent] 弹幕分片部分请求失败，已返回 ${fulfilledCount}/${total} 个成功分片`);
+    // 保留整体截止时间，并采用上游新增的分片并发限制。
+    const { results, timedOut, total } = await fetchTencentDanmuSegments(segmentList, {
+      deadlineMs: globals.tencentDanmuDeadlineMs,
+      concurrency: globals.tencentConcurrency,
+    });
+    const contents = [];
+    let fulfilledCount = 0;
+    for (const result of results) {
+      try {
+        if (result.status === "rejected") throw result.reason;
+        const data = typeof result.value?.data === "string" ? JSON.parse(result.value.data) : result.value?.data;
+        fulfilledCount++;
+        if (Array.isArray(data?.barrage_list)) contents.push(...data.barrage_list);
+      } catch (error) {
+        const segment = segmentList[result.index];
+        log("warn", `[tencent] 第 ${result.index + 1} 个分片请求失败: ${error?.message || error}（${segment.segment_start}-${segment.segment_end}s）`);
       }
-
-      const datas = results
-        .filter(result => result.status === "fulfilled")
-        .map(result => {
-          // 检查result是否包含响应数据
-          if (result.value && result.value.data) {
-            return result.value.data;
-          }
-          return null;
-        })
-        .filter(data => data !== null); // 过滤掉null值
-
-      datas.forEach(data => {
-        data = typeof data === "string" ? JSON.parse(data) : data;
-        contents.push(...data.barrage_list);
-      });
-    } catch (error) {
-      log("error", "[tencent] 解析弹幕数据失败:", error);
-      return [];
     }
+    if (timedOut) {
+      log("warn", `[tencent] 弹幕分片整体等待达到 ${globals.tencentDanmuDeadlineMs}ms 截止时间，已返回 ${fulfilledCount}/${total} 个成功分片`);
+    }
+    log("info", `[tencent] 分段下载完成: ${fulfilledCount}/${total}` + (fulfilledCount < total ? `，失败 ${total - fulfilledCount} 段` : ""));
 
     printFirst200Chars(contents);
 

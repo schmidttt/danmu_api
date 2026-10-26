@@ -24,19 +24,37 @@ import {
 
 let globals;
 
-function isAdminOnlySystemRoute(path, method) {
-  if (/^\/api\/(?:env|cache|cookie)(?:\/|$)/.test(path)) return true;
-  if (path === "/api/deploy" && method === "POST") return true;
-  if ((path === "/api/ai/verify" || path === "/api/nipaplay/verify") && method === "POST") return true;
-  return path === "/api/logs/clear" && method === "POST";
+const FONGMI_DANMAKU_PATHS = new Set([
+  "/danmaku",
+  "/api/v2/fongmi/danmaku"
+]);
+
+function isFongmiDanmakuRequest(path, method, url) {
+  if (method !== "GET" && method !== "POST") return false;
+  if (path === "/") {
+    return method === "POST" || (method === "GET" && url.searchParams.has("name"));
+  }
+  return FONGMI_DANMAKU_PATHS.has(path);
 }
+
+// 系统管理接口：必须显式携带 ADMIN_TOKEN，默认 TOKEN=87654321 的免 token 兼容不适用于这些路径
+const ADMIN_ONLY_PATH_PATTERNS = [
+  /^\/api\/env\/(?:set|add|del)\/?$/,
+  /^\/api\/deploy\/?$/,
+  /^\/api\/cache\/(?:clear|animes)\/?$/,
+  /^\/api\/logs\/clear\/?$/,
+  /^\/api\/cookie\/(?:status|save|verify|qr\/generate|qr\/check)\/?$/,
+  /^\/api\/ai\/verify\/?$/,
+  /^\/api\/nipaplay\/verify\/?$/,
+];
 
 async function handleRequest(req, env, deployPlatform, clientIp) {
   // 加载全局变量和环境变量配置
   globals = Globals.init(env);
 
   const url = new URL(req.url);
-  let path = url.pathname;
+  let path = url.pathname.replace(/\/{2,}/g, "/");
+  if (path.length > 1) path = path.replace(/\/+$/, "");
   const method = req.method;
 
   globals.deployPlatform = deployPlatform;
@@ -115,14 +133,15 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
     }
   }
 
-  // 系统配置、缓存、Cookie 与部署接口必须显式使用 ADMIN_TOKEN。
-  // 普通日志/请求记录读取仍由后续脱敏逻辑保持兼容。
-  if (method !== "OPTIONS" && isAdminOnlySystemRoute(tokenlessPath, method)) {
-    if (!globals.adminToken || explicitToken !== globals.adminToken) {
-      return jsonResponse(
-        { errorCode: 403, success: false, message: "权限不足", errorMessage: "ADMIN_TOKEN required" },
-        403
-      );
+  // 系统管理接口鉴权：只看请求实际携带的 token（explicitToken），避免默认 token 兼容垫片被用来自我授权
+  if (method !== "OPTIONS" && ADMIN_ONLY_PATH_PATTERNS.some((pattern) => pattern.test(tokenlessPath))) {
+    const isAdminRequest = Boolean(globals.adminToken) && explicitToken === globals.adminToken;
+    if (!isAdminRequest) {
+      const errorMessage = globals.adminToken
+        ? "Unauthorized: 系统管理接口需要 ADMIN_TOKEN"
+        : "Unauthorized: 系统管理接口需要先设置 ADMIN_TOKEN";
+      log("warn", `[system] [server] Admin-only endpoint denied: ${path} - ${errorMessage}`);
+      return jsonResponse({ errorCode: 401, success: false, errorMessage }, 401);
     }
   }
 
@@ -154,8 +173,8 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
     '/api/v2/segmentcomment'
   ];
 
-  // 只有当path包含指定接口关键字时才添加到请求记录数组
-  if (targetPaths.some(targetPath => path.includes(targetPath))) {
+  // 识别 FongMi 根地址或指定业务接口，记录请求历史和今日请求数。
+  if (isFongmiDanmakuRequest(tokenlessPath, method, url) || targetPaths.some(targetPath => path.includes(targetPath))) {
     // 更新今日请求计数
     // 从 reqRecords 最后一个元素获取上一个请求的时间
     const lastRecord = globals.reqRecords.length > 0 ? globals.reqRecords[globals.reqRecords.length - 1] : null;
@@ -223,7 +242,7 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
   }
 
   // GET /
-  if (path === "/" && method === "GET") {
+  if (path === "/" && method === "GET" && !isFongmiDanmakuRequest(path, method, url)) {
     return handleUI();
   }
 
@@ -372,7 +391,7 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
   }
 
   // GET /
-  if (path === "/" && method === "GET") {
+  if (path === "/" && method === "GET" && !isFongmiDanmakuRequest(path, method, url)) {
     return handleUI();
   }
 
@@ -386,13 +405,8 @@ async function handleRequest(req, env, deployPlatform, clientIp) {
     return searchEpisodes(url);
   }
 
-  // GET|POST /api/v2/fongmi/danmaku
-  if (path === "/api/v2/fongmi/danmaku" && (method === "GET" || method === "POST")) {
-    return getFongmiDanmaku(url, req);
-  }
-
-  // GET|POST /danmaku
-  if (path === "/danmaku" && (method === "GET" || method === "POST")) {
+  // GET|POST /、/danmaku 或 /api/v2/fongmi/danmaku
+  if (isFongmiDanmakuRequest(path, method, url)) {
     return getFongmiDanmaku(url, req);
   }
 

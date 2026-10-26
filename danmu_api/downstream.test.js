@@ -1015,7 +1015,7 @@ test('source registry preserves topology and enforces capability boundaries', as
   });
 
 test('upstream source compatibility fixes preserve the fork runtime', async () => {
-    assert.equal(Globals.VERSION, '1.21.6');
+    assert.equal(Globals.VERSION, '1.21.7');
 
     let maiduiduiRequestUrl;
     const maiduiduiResults = await withMockFetch(async (url) => {
@@ -2209,7 +2209,7 @@ test('favorite cache', async t => {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ items: ['searchCache'] })
       }), {}, 'cloudflare', '127.0.0.1', {});
-      assert.equal(missingAdminResponse.status, 403);
+      assert.equal(missingAdminResponse.status, 401);
       assert.equal(Globals.searchCache.has('protected-cache'), true);
 
       const env = { TOKEN: 'cache-user-token', ADMIN_TOKEN: 'cache-admin-token' };
@@ -2228,8 +2228,8 @@ test('favorite cache', async t => {
           new Request(`http://localhost/cache-user-token${path}`, { method }),
           env, 'cloudflare', '127.0.0.1', {}
         );
-        assert.equal(userResponse.status, 403, `${method} ${path}`);
-        assert.equal((await parseResponse(userResponse)).errorMessage, 'ADMIN_TOKEN required');
+        assert.equal(userResponse.status, 401, `${method} ${path}`);
+        assert.match((await parseResponse(userResponse)).errorMessage, /ADMIN_TOKEN/);
       }
       assert.equal(Globals.searchCache.has('protected-cache'), true);
 
@@ -2922,7 +2922,7 @@ test('NipaPlay configuration masks credentials and guards verification routes', 
     await withMockFetch(async () => { throw new Error('unauthorized requests must not contact relay'); }, async () => {
       for (const prefix of ['', '/relay-user-test']) {
         const denied = await handleRequest(new Request(`http://localhost${prefix}/api/nipaplay/verify`, { method: 'POST' }), env, 'cloudflare', '127.0.0.1', {});
-        assert.equal(denied.status, 403);
+        assert.equal(denied.status, 401);
         const config = await handleRequest(new Request(`http://localhost${prefix}/api/config`), env, 'cloudflare', '127.0.0.1', {});
         const content = await config.text();
         assert.doesNotMatch(content, /account#fixture|password#fixture/);

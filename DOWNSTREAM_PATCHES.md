@@ -18,11 +18,11 @@ This fork follows `huangxd-/danmu_api:main` as its architectural baseline. Local
 | AUTH-001 | Administrative and mutation routes | Sensitive mutations require explicit administrative authorization; masked endpoints must not expose or reuse secret material | Administrative-route, favorite authorization, masked endpoint and log-redaction tests | Upstream enforces equivalent authorization and redaction |
 | CACHE-001 | Search, favorites and cache isolation | Fallback search runs only when needed; favorites survive cache maintenance and remain isolated from transient caches | Fallback search, cache eligibility, favorite persistence and clear-cache tests | Upstream passes the same cache-isolation and persistence cases |
 | SOURCE-001 | Source registry reliability | Preserve upstream registry topology while isolating constructor/handler failures and validating dependencies and capabilities | Registry contract and synchronous handler failure-isolation tests | Upstream registry supplies equivalent validation and failure isolation |
-| PERF-001 | Tencent and Youku bounded concurrency | Slow or failed shards/workers cannot stall healthy results, reorder output or create unbounded concurrency | Tencent deadline/completion and Youku worker-pool tests | Upstream provides equivalent bounded scheduling and partial-result behavior |
+| PERF-001 | Tencent, iQIYI and Youku bounded concurrency | Slow or failed shards/workers cannot stall healthy results, reorder output or create unbounded concurrency | Upstream Tencent/iQIYI concurrency tests, Tencent deadline/queued-cancellation and Youku worker-pool tests | Upstream provides equivalent bounded scheduling and partial-result behavior |
 | SEARCH-001 | HTTP body deadlines and bounded server search | Body reads remain time-limited; stalled search/handler/season tasks cannot hold healthy results, start late requests or mutate shared anime caches; fallback retains a budget; incomplete results cannot replace complete search caches or favorites | `search-reliability.test.js`: body stalls, retry cancellation, source isolation, fallback reservation, late writes, complete ordering, episode 20, cross-season timeout and favorite preservation | Upstream supplies equivalent deadline, cancellation and cache-integrity guarantees; retain regressions when retiring this patch |
 | COLOR-001 | Color and gradient conversion | Keep upstream color semantics while ensuring bounded, smooth gradients and preserving native `color_v2` values | Gradient smoothness, bounds and native-color preservation tests | Upstream implementation passes the same conversion invariants |
 | HONGGUO-001 | Hongguo detail and fallback reliability | Preserve complete application details and use a bounded web fallback without discarding valid data | Hongguo complete-detail and bounded-fallback tests | Upstream covers the same completeness and fallback behavior |
-| LOCAL-001 | Optional cloud local-danmu reads | A cloud deployment without Redis skips local lookups without issuing network requests | `worker.test.js`: cloud without Redis skips optional local lookup | Upstream applies equivalent storage-readiness guards |
+| LOCAL-001 | Optional cloud local-danmu reads | A cloud deployment without Redis skips local lookups without issuing network requests | `downstream.test.js`: cloud without Redis skips optional local lookup | Upstream applies equivalent storage-readiness guards |
 
 ## Upstream review checklist
 
@@ -94,3 +94,13 @@ Reviewed complete upstream range `f47b786..5ef63a0` (8 commits, 25 changed paths
 - COLOR-001: adapted. Adopt unsuppressed-comment time sorting and protobuf field-tag fixes; retain smooth gradients and native colors.
 - MATCH-001, AUTH-001, CACHE-001, SOURCE-001, SEARCH-001, HONGGUO-001 and LOCAL-001: retained; upstream does not replace their remaining guarantees.
 - Adopt the upstream theme/proxy changes while retaining masked-endpoint and escaped-verification protections. Add loopback-only POST-byte and upstream-reset proxy regressions; preserve explicit serial offline test discovery and native Docker validation.
+
+## v1.21.7 integration review
+
+Reviewed complete upstream range `5ef63a0..4d325e0` (8 commits, 34 changed paths). See [UPSTREAM_REVIEW_v1.21.7.md](UPSTREAM_REVIEW_v1.21.7.md).
+
+- AUTH-001: reduced overlap. Adopt upstream explicit ADMIN_TOKEN route patterns and 401 responses; remove the duplicate local route predicate/gate while checking authorization before persistence initialization. Preserve credential, masking, favorite and local-upload protections.
+- PERF-001: adapted. Adopt Tencent/iQIYI concurrency settings and failure statistics; combine Tencent batches with the overall deadline and no queued requests after cancellation. Keep Youku default 16.
+- HONGGUO-001 and COLOR-001: adapted to the new search API, source color parsing and multi-source deduplication; keep bounded fallbacks and gradient/native-color guarantees.
+- MATCH-001, CACHE-001, SOURCE-001, SEARCH-001 and LOCAL-001: retained with upstream FongMi/Animeko/Hanjutv fixes.
+- Improve Fork Sync conflict diagnostics without suppressing failures or enabling automatic production merges; verify the new report and a post-release no-change run.
