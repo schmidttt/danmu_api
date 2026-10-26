@@ -119,28 +119,38 @@ jobs:
             } >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Report merge conflicts
+      - name: Report upstream conflicts (production unchanged)
         if: steps.updates.outputs.has_changes == 'true' && steps.merge.outputs.conflict == 'true'
         env:
           BASE_SHA: ${{ steps.updates.outputs.base_sha }}
           UPSTREAM_SHA: ${{ steps.updates.outputs.upstream_sha }}
+          SYNC_BRANCH: ${{ steps.updates.outputs.sync_branch }}
           CONFLICT_FILES: ${{ steps.merge.outputs.files }}
         run: |
+          conflict_count="$(printf '%s\n' "${CONFLICT_FILES}" | sed '/^$/d' | wc -l | tr -d ' ')"
           {
-            echo "## Upstream sync requires manual conflict resolution"
+            echo "## 上游更新需要人工解决合并冲突，生产未受影响"
             echo
-            echo "- Reviewed merge base: \`${BASE_SHA}\`"
-            echo "- Current upstream: \`${UPSTREAM_SHA}\`"
-            echo "- Production branch was not changed."
+            echo "自动合并检测到 ${conflict_count} 个冲突文件，已中止合并。候选分支未推送，生产 main 未修改，也未触发正式部署。"
             echo
-            echo "### Conflicting files"
+            echo "- 已合入的上游基线：\`${BASE_SHA}\`"
+            echo "- 本次上游提交：\`${UPSTREAM_SHA}\`"
+            echo "- 建议集成分支：\`${SYNC_BRANCH}\`"
+            echo "- [查看完整上游差异](https://github.com/${UPSTREAM_REPO}/compare/${BASE_SHA}...${UPSTREAM_SHA})"
+            echo
+            echo "### 冲突文件"
             echo
             echo '~~~text'
             printf '%s\n' "${CONFLICT_FILES}"
             echo '~~~'
+            echo
+            echo "### 后续处理"
+            echo "在临时分支合并完整上游，按 DOWNSTREAM_PATCHES.md 复核保护和冲突，创建 Draft PR，完成 Test、原生 Docker 和 Preview 验收后再上线。"
+            echo
+            echo "上线后在最新 main 手动运行本流程，确认无更新成功；不要直接重跑旧提交，也不要强推或重置生产 main。"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          echo "::error title=Upstream merge conflict::Review the conflict list in the job summary. Production main was not changed."
+          echo "::error title=上游同步冲突，生产未受影响::${conflict_count} 个文件需人工合并。已停止推送和部署；请查看本次运行摘要中的冲突清单、上游差异及处理步骤。"
           exit 1
 
       - name: Push automation branch
