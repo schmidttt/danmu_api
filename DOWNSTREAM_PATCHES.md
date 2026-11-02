@@ -104,3 +104,12 @@ Reviewed complete upstream range `5ef63a0..4d325e0` (8 commits, 34 changed paths
 - HONGGUO-001 and COLOR-001: adapted to the new search API, source color parsing and multi-source deduplication; keep bounded fallbacks and gradient/native-color guarantees.
 - MATCH-001, CACHE-001, SOURCE-001, SEARCH-001 and LOCAL-001: retained with upstream FongMi/Animeko/Hanjutv fixes.
 - Improve Fork Sync conflict diagnostics without suppressing failures or enabling automatic production merges; verify the new report and a post-release no-change run.
+
+## v1.21.8 integration review
+
+Reviewed the complete upstream range `4d325e0..9fa67ad` (10 commits, 38 upstream paths). See [UPSTREAM_REVIEW_v1.21.8.md](UPSTREAM_REVIEW_v1.21.8.md).
+
+- MATCH-001: adapted/reduced overlap. Adopt upstream platform-aware episode deduplication and offsetDuration; remove the normal-matching selectable-set workaround while retaining the exported compatibility option, main-content priority, mapped filtered-sequence semantics, sparse-local and missing-episode guards, and all regressions.
+- HONGGUO-001: adapted. Adopt upstream browser request headers for JSON and SSR searches while retaining the five-second web timeout, complete details, bounded fallback and cooldown behavior.
+- AUTH-001, CACHE-001, SOURCE-001, PERF-001, SEARCH-001, COLOR-001 and LOCAL-001: retained. New remote title mappings remain opt-in and administrator refresh remains explicitly gated; production configuration is unchanged.
+- Keep bounded matching log summaries with upstream category tags and preserve real upstream ancestry. Fork Sync continues to stop on unresolved conflicts; no automatic production merge is enabled.
