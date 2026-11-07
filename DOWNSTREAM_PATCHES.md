@@ -113,3 +113,11 @@ Reviewed the complete upstream range `4d325e0..9fa67ad` (10 commits, 38 upstream
 - HONGGUO-001: adapted. Adopt upstream browser request headers for JSON and SSR searches while retaining the five-second web timeout, complete details, bounded fallback and cooldown behavior.
 - AUTH-001, CACHE-001, SOURCE-001, PERF-001, SEARCH-001, COLOR-001 and LOCAL-001: retained. New remote title mappings remain opt-in and administrator refresh remains explicitly gated; production configuration is unchanged.
 - Keep bounded matching log summaries with upstream category tags and preserve real upstream ancestry. Fork Sync continues to stop on unresolved conflicts; no automatic production merge is enabled.
+
+## v1.21.9 integration review
+
+Reviewed complete upstream range `9fa67ad..4c86579` (4 commits, 27 upstream paths). See [UPSTREAM_REVIEW_v1.21.9.md](UPSTREAM_REVIEW_v1.21.9.md).
+
+- MATCH-001 and HONGGUO-001: adapted. Adopt remote season mapping and collection fixes, preserving local rule priority, source registry isolation, complete details, bounded fallback and inferred-duration timeline accumulation.
+- AUTH-001, CACHE-001, SOURCE-001, PERF-001, SEARCH-001, COLOR-001 and LOCAL-001: retained. The new administrator refresh route is explicitly gated; existing budgets, cache and credential guarantees remain.
+- Adopt the shared remote-table loader, removing superseded title-loader duplication. Preserve the baseline COMMENT_CACHE_MIN_COUNT default and deleted PR Agent workflow; no production configuration is changed.
