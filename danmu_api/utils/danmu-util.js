@@ -8,26 +8,25 @@ import { convertDanAny } from './dan-any.js';
 // danmu处理相关函数
 // =====================
 
-/**
- * 计算时间点分组键：相邻相差不超过一个百分位的弹幕归为同一点（times 需按升序排列）
- * 弹弹按两位小数存储时间，同一条弹幕可能出现 251.25 与 251.26 这样的相邻写法
- * @param {Array<number>} times 升序排列的弹幕时间（秒）
- * @returns {Array<string>} 与输入等长的分组键
- */
-function buildTimePointKeys(times) {
+function getDanmuMessage(danmu) {
+  return danmu.m.split(' X')[0].trim();
+}
+
+// 为同一文案保留首条时间作为锚点，避免密集弹幕不断扩大 10ms 的合并范围。
+function buildTimePointKeys(timedDanmus) {
   const toleranceMs = 10;
-  const keys = new Array(times.length);
+  const pointsByMessage = new Map();
   let pointIndex = 0;
-  let previousMs = null;
-  for (let i = 0; i < times.length; i++) {
-    const ms = Math.round(times[i] * 1000);
-    if (previousMs === null || ms - previousMs > toleranceMs) {
-      pointIndex += 1;
+  return timedDanmus.map(({ danmu, time }) => {
+    const message = getDanmuMessage(danmu);
+    const ms = Math.round(time * 1000);
+    let point = pointsByMessage.get(message);
+    if (!point || !(ms - point.startMs <= toleranceMs)) {
+      point = { startMs: ms, key: `point-${++pointIndex}` };
+      pointsByMessage.set(message, point);
     }
-    previousMs = ms;
-    keys[i] = `point-${pointIndex}`;
-  }
-  return keys;
+    return point.key;
+  });
 }
 
 /**
@@ -52,8 +51,7 @@ export function groupDanmusByMinute(filteredDanmus, n, isMultiSource = false) {
     }
   }
 
-  // n=0 时把相邻 10ms 内的时间聚成同一时间点
-  const timePointKeys = n === 0 ? buildTimePointKeys(timedDanmus.map(entry => entry.time)) : null;
+  const timePointKeys = n === 0 ? buildTimePointKeys(timedDanmus) : null;
   // 按分组键归集
   const groupedByTime = timedDanmus.reduce((acc, { danmu, time }, index) => {
     const groupKey = n === 0 ? timePointKeys[index] : Math.floor(time / (n * 60));
@@ -70,7 +68,7 @@ export function groupDanmusByMinute(filteredDanmus, n, isMultiSource = false) {
 
     // 按消息内容分组
     const groupedByMessage = danmus.reduce((acc, danmu) => {
-      const message = danmu.m.split(' X')[0].trim(); // 提取原始消息（去除 Xn 后缀）
+      const message = getDanmuMessage(danmu);
       if (!acc[message]) {
         acc[message] = {
           count: 0,

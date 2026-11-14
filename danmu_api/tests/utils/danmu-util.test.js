@@ -210,6 +210,20 @@ test('danmu convertToDanmakuJson 多源未开启分组时超出容差的时间�
   assert.deepStrictEqual(out.map(d => d.t), [10, 10.03], '相隔 10ms 合并为一点，30ms 另起一点');
 });
 
+test('danmu convertToDanmakuJson 密集弹幕不会扩大同文案的合并窗口', () => {
+  Globals.init({ GROUP_MINUTE: '0', DANMU_LIMIT: '0', CONVERT_COLOR: 'default', BLOCKED_WORDS: '' });
+  const out = convertToDanmakuJson([
+    { p: '10.00,1,16777215,[dandan]', m: '同一句话', cid: 1, _sourceLabel: 'dandan' },
+    { p: '10.01,1,16777215,[bilibili]', m: '另一句话', cid: 2, _sourceLabel: 'bilibili' },
+    { p: '10.02,1,16777215,[bilibili]', m: '同一句话', cid: 3, _sourceLabel: 'bilibili' },
+    { p: '10.03,1,16777215,[dandan]', m: '同一句话', cid: 4, _sourceLabel: 'dandan' },
+    { p: '10.04,1,16777215,[bilibili]', m: '同一句话', cid: 5, _sourceLabel: 'bilibili' },
+  ], 'dandan＆bilibili');
+
+  assert.deepStrictEqual(out.map(d => d.t), [10, 10.01, 10.02, 10.04]);
+  assert.strictEqual(out[2].p, '10.02,1,16777215,[bilibili＆dandan]');
+});
+
 test('danmu convertToDanmakuJson 多源且按分钟去重时同分钟内容合并', () => {
   Globals.init({ GROUP_MINUTE: '1', DANMU_LIMIT: '0', CONVERT_COLOR: 'default', BLOCKED_WORDS: '' });
   // 同样两条数据，开启分组后应落在同一分钟区间内被合并，用于对照上一条用例的分组粒度

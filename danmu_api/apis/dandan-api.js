@@ -239,10 +239,14 @@ function isMovieMatchCandidate(anime) {
 }
 
 // 计算对外上报的集数：过滤只会减少可用集数，平台声明值更小时以声明值为准
-export function resolveEpisodeCount(declaredCount, availableCount) {
+export function resolveEpisodeCount(declaredCount, availableCount, links = []) {
   const declared = Number(declaredCount) || 0;
   const available = Number(availableCount) || 0;
   if (available <= 0) return declared;
+  // 红果全集用一条可播放链接代表多集，保留已知的实际集数。
+  if (available === 1 && links.length === 1 && isHongguoSeriesId(links[0].url)) {
+    return declared || available;
+  }
   return declared > 0 ? Math.min(declared, available) : available;
 }
 
@@ -258,7 +262,7 @@ export function applyEpisodeTitleFilter(anime, links) {
     episodeTitle: link.title,
     episodeNumber: index + 1
   })));
-  anime.episodeCount = resolveEpisodeCount(anime.episodeCount, episodesList.length);
+  anime.episodeCount = resolveEpisodeCount(anime.episodeCount, episodesList.length, links);
   return episodesList;
 }
 
@@ -1046,7 +1050,8 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
 
   storeAnimeIdsToMap(curAnimes, queryTitle);
 
-  // 如果启用了集标题过滤，则为每个动漫添加过滤后的 episodes
+  // 保存响应的过滤后集数，搜索与收藏缓存继续读取原始集数。
+  const filteredEpisodeCounts = new Map();
   if (globals.enableAnimeEpisodeFilter) {
     const validAnimes = [];
     for (const anime of curAnimes) {
@@ -1059,13 +1064,15 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
 
       const animeData = resolveAnimeDetailForSearch(anime, requestAnimeDetailsMap);
       if (animeData && animeData.links) {
-        const episodesList = applyEpisodeTitleFilter(anime, animeData.links);
+        const counted = { ...anime };
+        const episodesList = applyEpisodeTitleFilter(counted, animeData.links);
 
         log("info", `[system] [searchAnime] Anime ${anime.animeId} filtered episodes: ${episodesList.length}/${animeData.links.length}`);
 
         // 只有当过滤后还有有效剧集时才保留该动漫
         if (episodesList.length > 0) {
           validAnimes.push(anime);
+          filteredEpisodeCounts.set(anime, counted.episodeCount);
         }
       }
     }
@@ -1100,7 +1107,10 @@ async function searchAnimeBody(url, preferAnimeId = null, preferSource = null, d
       errorCode: unavailable ? 503 : 0,
       success: !unavailable,
       errorMessage: unavailable ? '搜索源未能完整响应，请稍后重试' : responseAnimes.length === 0 ? getAddAnimeError(requestAnimeDetailsMap) : '',
-      animes: responseAnimes,
+      animes: responseAnimes.map((anime, index) => {
+        const episodeCount = filteredEpisodeCounts.get(curAnimes[index]);
+        return episodeCount === undefined ? anime : { ...anime, episodeCount };
+      }),
       tmdbSeasonBoundaries,
       searchIncomplete,
     }, unavailable ? 503 : 200);
@@ -2498,7 +2508,7 @@ export function buildBangumiData(anime, idParam = "") {
         airDate: anime.startDate,
         name: `Season ${localSeason}`,
         episodeCount: globals.enableAnimeEpisodeFilter
-          ? resolveEpisodeCount(anime.episodeCount, episodesList.length)
+          ? resolveEpisodeCount(anime.episodeCount, episodesList.length, anime.links)
           : anime.episodeCount,
       },
     ],
