@@ -8,6 +8,27 @@ import { convertDanAny } from './dan-any.js';
 // danmu处理相关函数
 // =====================
 
+function getDanmuMessage(danmu) {
+  return danmu.m.split(' X')[0].trim();
+}
+
+// 为同一文案保留首条时间作为锚点，避免密集弹幕不断扩大 10ms 的合并范围。
+function buildTimePointKeys(timedDanmus) {
+  const toleranceMs = 10;
+  const pointsByMessage = new Map();
+  let pointIndex = 0;
+  return timedDanmus.map(({ danmu, time }) => {
+    const message = getDanmuMessage(danmu);
+    const ms = Math.round(time * 1000);
+    let point = pointsByMessage.get(message);
+    if (!point || !(ms - point.startMs <= toleranceMs)) {
+      point = { startMs: ms, key: `point-${++pointIndex}` };
+      pointsByMessage.set(message, point);
+    }
+    return point.key;
+  });
+}
+
 /**
  * 对弹幕进行分组、去重和计数处理
  * @param {Array} filteredDanmus 已过滤屏蔽词的弹幕列表
@@ -16,31 +37,27 @@ import { convertDanAny } from './dan-any.js';
  * @returns {Array} 处理后的弹幕列表
  */
 export function groupDanmusByMinute(filteredDanmus, n, isMultiSource = false) {
-  // 特殊逻辑：如果未开启分组(n=0)且为单源，按时间排序后返回原始数据
-  // 若为多源，即使n=0也强制执行精确时间点去重，以消除源之间的重复数据
-  if (n === 0 && !isMultiSource) {
-    return filteredDanmus
-      .map(danmu => ({
-        ...danmu,
-        t: danmu.t !== undefined ? danmu.t : parseFloat(danmu.p.split(',')[0])
-      }))
-      .sort((a, b) => a.t - b.t);
+  // 获取时间：优先使用 t 字段，如果没有则使用 p 的第一个值
+  const timedDanmus = filteredDanmus.map(danmu => ({
+    danmu,
+    time: danmu.t !== undefined ? danmu.t : parseFloat(danmu.p.split(',')[0])
+  }));
+
+  // 特殊逻辑：未开启分组(n=0)时先按时间升序；单源按此顺序返回，多源在此顺序上做精确时间点去重，以消除源之间的重复数据
+  if (n === 0) {
+    timedDanmus.sort((a, b) => a.time - b.time);
+    if (!isMultiSource) {
+      return timedDanmus.map(({ danmu, time }) => ({ ...danmu, t: time }));
+    }
   }
 
-  // 按 n 分钟分组
-  const groupedByTime = filteredDanmus.reduce((acc, danmu) => {
-    // 获取时间：优先使用 t 字段，如果没有则使用 p 的第一个值
-    const time = danmu.t !== undefined ? danmu.t : parseFloat(danmu.p.split(',')[0]);
-
-    // 确定分组键：n=0时使用精确时间(保留2位小数)，否则使用分钟索引
-    const groupKey = n === 0 ? time.toFixed(2) : Math.floor(time / (n * 60));
-
-    // 初始化分组
+  const timePointKeys = n === 0 ? buildTimePointKeys(timedDanmus) : null;
+  // 按分组键归集
+  const groupedByTime = timedDanmus.reduce((acc, { danmu, time }, index) => {
+    const groupKey = n === 0 ? timePointKeys[index] : Math.floor(time / (n * 60));
     if (!acc[groupKey]) {
       acc[groupKey] = [];
     }
-
-    // 添加到对应分组
     acc[groupKey].push({ ...danmu, t: time });
     return acc;
   }, {});
@@ -51,7 +68,7 @@ export function groupDanmusByMinute(filteredDanmus, n, isMultiSource = false) {
 
     // 按消息内容分组
     const groupedByMessage = danmus.reduce((acc, danmu) => {
-      const message = danmu.m.split(' X')[0].trim(); // 提取原始消息（去除 Xn 后缀）
+      const message = getDanmuMessage(danmu);
       if (!acc[message]) {
         acc[message] = {
           count: 0,

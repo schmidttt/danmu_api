@@ -4,6 +4,7 @@ import { Globals, globals } from './configs/globals.js';
 import { searchAnime, searchEpisodes, getBangumi } from './apis/dandan-api.js';
 import { refreshFavoriteByKeyword } from './apis/favorite-api.js';
 import { getSourceByKey } from './sources/registry.js';
+import { createHongguoSeriesId } from './sources/hongguo.js';
 import { httpGet, httpPost, httpGetWithStreamCheck } from './utils/http-util.js';
 import { addAnime, setSearchCache } from './utils/cache-util.js';
 import { addFavorite } from './utils/favorite-util.js';
@@ -166,6 +167,34 @@ test('search reliability regressions', { timeout: 15000 }, async t => {
       const episodeResult = await (await searchEpisodes(new URL('https://test.invalid/api/v2/search/episodes?anime=光阴之外&episode=20'))).json();
       assert.equal(episodeResult.animes.length, 2);
       assert.ok(episodeResult.animes.every(a => a.episodes.length === 1 && a.episodes[0].episodeTitle.includes('第20集')));
+    });
+  });
+
+  await t.test('filtered search counts preserve cached counts and Hongguo collections', async () => {
+    reset(['tencent', 'hongguo']);
+    globals.enableAnimeEpisodeFilter = true;
+    const fromSource = anime => ({
+      search: async () => [{ title: anime.animeTitle }],
+      handleAnimes: async (_raw, _title, results, details) => {
+        addAnime(anime, details);
+        results.push(anime);
+      },
+    });
+    const tencent = candidate(105, 'tencent');
+    tencent.links[19].title = '先导片';
+    const hongguo = candidate(106, 'hongguo');
+    hongguo.links = [{ title: '全集', url: createHongguoSeriesId('106') }];
+    await withSources({ tencent: fromSource(tencent), hongguo: fromSource(hongguo) }, async () => {
+      const getCounts = async () => (await (await searchAnime(searchUrl())).json()).animes.map(anime => anime.episodeCount);
+      assert.deepEqual(await getCounts(), [19, 20], '首次搜索过滤正片数并保留全集集数');
+      assert.deepEqual(globals.searchCache.get('光阴之外').results.map(anime => anime.episodeCount), [20, 20]);
+      assert.deepEqual(await getCounts(), [19, 20], '缓存命中时的集数与首次搜索一致');
+      const details = await (await getBangumi('/api/v2/bangumi/106')).json();
+      assert.equal(details.bangumi.episodes.length, 1);
+      assert.equal(details.bangumi.seasons[0].episodeCount, 20);
+
+      globals.enableAnimeEpisodeFilter = false;
+      assert.deepEqual(await getCounts(), [20, 20], '关闭过滤后从缓存恢复声明集数');
     });
   });
 
