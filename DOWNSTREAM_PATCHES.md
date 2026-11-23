@@ -128,3 +128,10 @@ Reviewed the full upstream range `4c86579..619612b` (3 commits, 11 upstream path
 
 - MATCH-001, COLOR-001 and HONGGUO-001: adapted. Keep exact-name lookup before year fallback, bound same-message aggregation to 10 ms from the first timestamp, preserve native colors, and keep Hongguo collection counts with a single play link.
 - CACHE-001, AUTH-001, SOURCE-001, PERF-001, SEARCH-001 and LOCAL-001: retained. Apply filtered counts to responses while preserving the original counts in cached searches and favorites.
+
+## v1.22.0 integration review
+
+Reviewed the complete upstream range `619612b..e78bfe4` (8 functional commits, 2 merge commits, 61 paths). See [UPSTREAM_REVIEW_v1.22.0.md](UPSTREAM_REVIEW_v1.22.0.md).
+
+- MATCH-001, AUTH-001, CACHE-001, SOURCE-001 and SEARCH-001: adapted. Adopt per-title source preferences, episode catalogs and request details within the existing bounded pipelines, authorization and cache protection. Keep original counts in stored searches and favorites. Mask trace display keys while retaining actual cache keys for lookup and writes.
+- PERF-001, COLOR-001, HONGGUO-001 and LOCAL-001: retained. Preserve deadlines, cancellation, native colors, bounded time-point deduplication, collection counts and optional cloud storage guards.

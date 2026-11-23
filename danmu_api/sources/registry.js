@@ -45,6 +45,7 @@ import LocalSource from './local.js';
 //   factory         —— 实例工厂 (ctx) => instance。ctx 是已建好实例的 Map（key->instance），供有依赖的源取依赖
 //   searchArgs      —— 构造 search 参数；默认只传 queryTitle，vod 会额外传偏好参数
 //   deps            —— 该源依赖的其他源 key 列表（用于排序），无依赖为空
+//   aggregator      —— 采集源标记；检索结果来自多个播放平台
 //   canSearch       —— 是否允许进入 SOURCE_ORDER 搜索管道；默认 true
 //   canHandle       —— 是否允许把搜索结果转换为 Anime；默认 true
 //   canMerge        —— 是否允许进入 MERGE_SOURCE_PAIRS 聚合弹幕管道
@@ -54,8 +55,8 @@ import LocalSource from './local.js';
 //                      未提供时默认调用 instance.handleAnimes(searchResult, queryTitle, isolatedAnimes, isolatedDetailStore, targetSeason)
 //                      新增源若 handleAnimes 签名标准（5 参），可不提供 handleAdapter
 const SOURCE_REGISTRY = [
-  { key: '360',       logName: '360kan',  factory: () => new Kan360Source(), deps: [] },
-  { key: 'vod',       logName: '',        factory: () => new VodSource(), deps: [],
+  { key: '360',       logName: '360kan',  factory: () => new Kan360Source(), deps: [], displayName: '360 影视', aggregator: true },
+  { key: 'vod',       logName: '',        factory: () => new VodSource(), deps: [], displayName: 'VOD 服务器', aggregator: true, extraSearchArgs: true,
     searchArgs: (queryTitle, preferAnimeId, preferSource) => [queryTitle, preferAnimeId, preferSource],
     handleAdapter: async (instance, searchResult, queryTitle, isolatedAnimes, isolatedDetailStore, targetSeason) => {
       // vod 源: search 返回多服务器结果数组，需逐个遍历并传入 serverName
@@ -67,30 +68,30 @@ const SOURCE_REGISTRY = [
         }
       }
     } },
-  { key: 'tmdb',      logName: '',        factory: (ctx) => new TmdbSource(ctx.get('douban')), deps: ['douban'] },
-  { key: 'douban',    logName: '',        factory: (ctx) => new DoubanSource(ctx.get('tencent'), ctx.get('iqiyi'), ctx.get('youku'), ctx.get('bilibili'), ctx.get('migu')), deps: ['tencent', 'iqiyi', 'youku', 'bilibili', 'migu'] },
-  { key: 'renren',    logName: '',        factory: () => new RenrenSource(), deps: [], canMerge: true, canDirect: true },
-  { key: 'hanjutv',   logName: '',        factory: () => new HanjutvSource(), deps: [], canMerge: true, canDirect: true },
-  { key: 'bahamut',   logName: '',        factory: () => new BahamutSource(), deps: [], canMerge: true, canDirect: true },
-  { key: 'dandan',    logName: '',        factory: () => new DandanSource(), deps: [], canMerge: true, canDirect: true },
-  { key: 'custom',    logName: '',        factory: () => new CustomSource(), deps: [], canDirect: true,
+  { key: 'tmdb',      logName: '',        factory: (ctx) => new TmdbSource(ctx.get('douban')), deps: ['douban'], displayName: 'TMDB', aggregator: true },
+  { key: 'douban',    logName: '',        factory: (ctx) => new DoubanSource(ctx.get('tencent'), ctx.get('iqiyi'), ctx.get('youku'), ctx.get('bilibili'), ctx.get('migu')), deps: ['tencent', 'iqiyi', 'youku', 'bilibili', 'migu'], displayName: '豆瓣', aggregator: true },
+  { key: 'renren',    logName: '',        factory: () => new RenrenSource(), deps: [], canMerge: true, canDirect: true, displayName: '人人视频' },
+  { key: 'hanjutv',   logName: '',        factory: () => new HanjutvSource(), deps: [], canMerge: true, canDirect: true, displayName: '韩剧 TV' },
+  { key: 'bahamut',   logName: '',        factory: () => new BahamutSource(), deps: [], canMerge: true, canDirect: true, displayName: '巴哈姆特动画疯' },
+  { key: 'dandan',    logName: '',        factory: () => new DandanSource(), deps: [], canMerge: true, canDirect: true, displayName: '弹弹play' },
+  { key: 'custom',    logName: '',        factory: () => new CustomSource(), deps: [], canDirect: true, displayName: '自定义源',
     handleAdapter: (instance, searchResult, queryTitle, isolatedAnimes, isolatedDetailStore) =>
       instance.handleAnimes(searchResult, queryTitle, isolatedAnimes, isolatedDetailStore) },
-  { key: 'tencent',   logName: '',        factory: () => new TencentSource(), deps: [], canMerge: true },
-  { key: 'iqiyi',     logName: '',        factory: () => new IqiyiSource(), deps: [], canMerge: true },
-  { key: 'imgo',      logName: 'mango',   factory: () => new MangoSource(), deps: [], canMerge: true },
-  { key: 'bilibili',  logName: '',        factory: () => new BilibiliSource(), deps: [], canMerge: true },
-  { key: 'migu',      logName: '',        factory: () => new MiguSource(), deps: [], canMerge: true },
-  { key: 'youku',     logName: '',        factory: () => new YoukuSource(), deps: [], canMerge: true },
-  { key: 'sohu',      logName: '',        factory: () => new SohuSource(), deps: [], canMerge: true },
-  { key: 'leshi',     logName: '',        factory: () => new LeshiSource(), deps: [], canMerge: true },
-  { key: 'xigua',     logName: '',        factory: () => new XiguaSource(), deps: [], canMerge: true },
-  { key: 'maiduidui', logName: '',        factory: () => new MaiduiduiSource(), deps: [], canMerge: true },
-  { key: 'aiyifan',   logName: '',        factory: () => new AiyifanSource(), deps: [], canMerge: true },
-  { key: 'hongguo',   logName: '',        factory: () => new HongguoSource(), deps: [], canMerge: true, canDirect: true },
-  { key: 'animeko',   logName: '',        factory: () => new AnimekoSource(), deps: [], canMerge: true, canDirect: true },
-  { key: 'local',     logName: 'local',   factory: () => new LocalSource(), deps: [], canDirect: true },
-  { key: 'other',     logName: '',        factory: () => new OtherSource(), deps: [], canSearch: false, canHandle: false },
+  { key: 'tencent',   logName: '',        factory: () => new TencentSource(), deps: [], canMerge: true, displayName: '腾讯视频' },
+  { key: 'iqiyi',     logName: '',        factory: () => new IqiyiSource(), deps: [], canMerge: true, displayName: '爱奇艺' },
+  { key: 'imgo',      logName: 'mango',   factory: () => new MangoSource(), deps: [], canMerge: true, displayName: '芒果 TV' },
+  { key: 'bilibili',  logName: '',        factory: () => new BilibiliSource(), deps: [], canMerge: true, displayName: '哔哩哔哩' },
+  { key: 'migu',      logName: '',        factory: () => new MiguSource(), deps: [], canMerge: true, displayName: '咪咕视频' },
+  { key: 'youku',     logName: '',        factory: () => new YoukuSource(), deps: [], canMerge: true, displayName: '优酷' },
+  { key: 'sohu',      logName: '',        factory: () => new SohuSource(), deps: [], canMerge: true, displayName: '搜狐视频' },
+  { key: 'leshi',     logName: '',        factory: () => new LeshiSource(), deps: [], canMerge: true, displayName: '乐视视频' },
+  { key: 'xigua',     logName: '',        factory: () => new XiguaSource(), deps: [], canMerge: true, displayName: '西瓜视频' },
+  { key: 'maiduidui', logName: '',        factory: () => new MaiduiduiSource(), deps: [], canMerge: true, displayName: '埋堆堆' },
+  { key: 'aiyifan',   logName: '',        factory: () => new AiyifanSource(), deps: [], canMerge: true, displayName: '爱壹帆' },
+  { key: 'hongguo',   logName: '',        factory: () => new HongguoSource(), deps: [], canMerge: true, canDirect: true, displayName: '红果短剧' },
+  { key: 'animeko',   logName: '',        factory: () => new AnimekoSource(), deps: [], canMerge: true, canDirect: true, displayName: 'Animeko' },
+  { key: 'local',     logName: 'local',   factory: () => new LocalSource(), deps: [], canDirect: true, displayName: '本地弹幕' },
+  { key: 'other',     logName: '',        factory: () => new OtherSource(), deps: [], canSearch: false, canHandle: false, displayName: '第三方弹幕服务器' },
 ];
 
 // ---- 定义与实例缓存（按 key 索引）----
@@ -159,6 +160,9 @@ function buildSource(key, dependencyPath = []) {
     const buildSearchArgs = entry.searchArgs || ((queryTitle) => [queryTitle]);
     const meta = Object.freeze({
       key: entry.key,
+      displayName: entry.displayName || entry.key,
+      aggregator: entry.aggregator === true,
+      extraSearchArgs: entry.extraSearchArgs === true,
       logName: entry.logName || entry.key,
       instance,
       deps: Object.freeze([...entry.deps]),
@@ -201,6 +205,18 @@ export function getSourceByKey(key) {
 export function getSourceMetaByKey(key) {
   const instance = buildSource(key);
   return instance ? metaMap.get(key) : null;
+}
+
+/**
+ * 按 sourceKey 取界面展示名。只查询定义，避免日志与追踪展示触发无关源实例化。
+ * 采集源附加标注；未注册返回原值。
+ */
+export function getSourceLabel(key) {
+  validateRegistryDefinitions();
+  const entry = definitionMap.get(key);
+  if (!entry) return key;
+  const displayName = entry.displayName || entry.key;
+  return entry.aggregator ? `${displayName}（采集源）` : displayName;
 }
 
 /**

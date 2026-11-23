@@ -1015,7 +1015,7 @@ test('source registry preserves topology and enforces capability boundaries', as
   });
 
 test('upstream source compatibility fixes preserve the fork runtime', async () => {
-    assert.equal(Globals.VERSION, '1.21.10');
+    assert.equal(Globals.VERSION, '1.22.0');
 
     let maiduiduiRequestUrl;
     const maiduiduiResults = await withMockFetch(async (url) => {

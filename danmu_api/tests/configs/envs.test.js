@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Envs } from '../../configs/envs.js';
 import { Globals } from '../../configs/globals.js';
+import { TRACE_CONFIG_ACCESSORS, describeConfigValue } from '../../utils/pipeline-trace.js';
 
 test('TITLE_NOISE_FILTER 默认规则为合法正则，且文档默认值与其一致', async () => {
     const savedEnv = Envs.env;
@@ -384,9 +385,8 @@ test('resolvePlatformOrder 单个/组合平台、空值与记账', () => {
     assert.deepStrictEqual(Envs.resolvePlatformOrder(), ['bilibili1&dandan', 'youku', null]);
     assert.deepStrictEqual(Envs.accessedEnvVars.get('PLATFORM_ORDER'), ['bilibili1&dandan', 'youku']);
 
-    // 仅做首尾 trim：'&' 两侧的内部空格会保留在返回项中，但校验时逐段 trim
     initEnvs({ PLATFORM_ORDER: ' custom & animeko , qiyi&nope ' });
-    assert.deepStrictEqual(Envs.resolvePlatformOrder(), ['custom & animeko', null]);
+    assert.deepStrictEqual(Envs.resolvePlatformOrder(), ['custom&animeko', null]);
 
     initEnvs({ PLATFORM_ORDER: ',,,,' });
     assert.deepStrictEqual(Envs.resolvePlatformOrder(), [null]);
@@ -396,6 +396,35 @@ test('resolvePlatformOrder 单个/组合平台、空值与记账', () => {
   } finally {
     restoreProcessEnv(saved);
   }
+});
+
+test('按剧匹配平台与 UI 选项共享平台定义，并随合并配置更新', () => {
+  const config = Globals.init({
+    TITLE_PLATFORM_MAP: '甲->tencent;乙->bilibili ＆ iqiyi;丙->qq&unknown;丁->;甲->imgo;戊->qq->qiyi',
+    MERGE_SOURCE_PAIRS: 'bilibili&iqiyi;renren&hanjutv;dandan',
+    PLATFORM_ORDER: 'custom&qq'
+  });
+  assert.deepEqual([...config.titlePlatformMap], [['甲', 'imgo'], ['乙', 'bilibili1&qiyi']]);
+  assert.deepEqual(config.envVarConfig.TITLE_PLATFORM_MAP.options, [...Envs.ALLOWED_PLATFORMS, 'bilibili1&qiyi', 'renren&hanjutv', 'custom&qq']);
+  Globals.init({ MERGE_SOURCE_PAIRS: 'tencent&animeko' });
+  assert.equal(config.titlePlatformMap.size, 0);
+  assert.deepEqual(config.envVarConfig.TITLE_PLATFORM_MAP.options, [...Envs.ALLOWED_PLATFORMS, 'qq&animeko']);
+});
+
+test('新增配置追踪保留下游预算与凭据脱敏', () => {
+  const config = Globals.init({ DANDANPLAY_PASSWORD: 'test#password', ADMIN_TOKEN: 'test#admin' });
+  assert.equal(config.searchTimeoutMs, 18000);
+  assert.equal(config.tencentDanmuDeadlineMs, 8000);
+  assert.equal(config.youkuConcurrency, 16);
+  assert.equal(config.commentCacheMinCount, 1);
+  assert.equal(TRACE_CONFIG_ACCESSORS.TITLE_PLATFORM_MAP, 'titlePlatformMap');
+  assert.equal(TRACE_CONFIG_ACCESSORS.SOURCE_FALLBACK_ORDER, 'sourceFallbackOrderArr');
+  assert.equal(TRACE_CONFIG_ACCESSORS.SEARCH_TIMEOUT_MS, 'searchTimeoutMs');
+  assert.equal(TRACE_CONFIG_ACCESSORS.TENCENT_DANMU_DEADLINE_MS, 'tencentDanmuDeadlineMs');
+  assert.equal(describeConfigValue('dandanplayPassword', config.dandanplayPassword), '已设置');
+  assert.equal(describeConfigValue('adminToken', config.adminToken), '已设置');
+  assert.equal(describeConfigValue('aiBaseUrl', 'https://user:password@example.test/v1?key=test'), '已设置');
+  assert.equal(Envs.accessedEnvVars.get('DANDANPLAY_PASSWORD'), '*'.repeat('test#password'.length));
 });
 
 test('resolveMergeSourcePairs 主源校验、自我合并排除与分隔符', () => {
