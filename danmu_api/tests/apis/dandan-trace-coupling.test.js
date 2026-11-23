@@ -20,7 +20,8 @@ import {
 const KEYWORD = '打点耦合校验剧名';
 
 function seedCache() {
-  Globals.init({});
+  Globals.init({ SOURCE_FALLBACK_ORDER: '' });
+  Globals.envs.sourceFallbackOrderArr = [];
   useAsyncLocalStorage(AsyncLocalStorage);
   setSearchCache(KEYWORD, [{
     animeId: 9001,

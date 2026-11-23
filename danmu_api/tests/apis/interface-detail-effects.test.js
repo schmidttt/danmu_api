@@ -17,7 +17,8 @@ import {
 } from '../../utils/pipeline-trace.js';
 
 function initGlobals(overrides = {}) {
-  Globals.init(overrides);
+  Globals.init({ SOURCE_FALLBACK_ORDER: '', ...overrides });
+  if (!overrides.SOURCE_FALLBACK_ORDER) Globals.envs.sourceFallbackOrderArr = [];
   useAsyncLocalStorage(AsyncLocalStorage);
 }
 

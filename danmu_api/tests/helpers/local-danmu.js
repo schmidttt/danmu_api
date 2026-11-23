@@ -26,7 +26,8 @@ export const localDanmuEncodings = [
 ];
 
 export function resetState(sourceOrder = 'local') {
-  Globals.init({ SOURCE_ORDER: sourceOrder, LOG_LEVEL: 'error', GROUP_MINUTE: '0' });
+  Globals.init({ SOURCE_ORDER: sourceOrder, SOURCE_FALLBACK_ORDER: '', LOG_LEVEL: 'error', GROUP_MINUTE: '0' });
+  Globals.envs.sourceFallbackOrderArr = [];
   Globals.deployPlatform = 'node';
   Globals.animes = [];
   Globals.episodeIds = [];

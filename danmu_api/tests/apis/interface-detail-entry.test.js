@@ -67,7 +67,10 @@ test('handleRequestWithTrace 只留存写入请求记录的请求', async () => 
   assert.equal(getTraceRecords().length, before, '详情查询自身不产生请求记录，不应留存追踪');
 
   const businessRequest = new Request('http://localhost/secret-tok/api/v2/search/episodes?anime=x', { method: 'GET' });
-  await handleRequestWithTrace(businessRequest, { TOKEN: 'secret-tok' }, 'cloudflare', '9.9.9.9');
+  await withMockFetch(
+    async () => new Response(JSON.stringify({ animes: [] }), { status: 200 }),
+    () => handleRequestWithTrace(businessRequest, { TOKEN: 'secret-tok' }, 'cloudflare', '9.9.9.9'),
+  );
   assert.equal(getTraceRecords().length, before + 1, '业务接口应留存追踪');
 });
 

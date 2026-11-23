@@ -19,7 +19,8 @@ import { createFavoriteAnime, favoriteSearchResult } from '../helpers/favorites.
 import { buildLocalDanmuResourceKey } from '../../utils/local-danmu-parser.js';
 
 function initGlobals(overrides = {}) {
-  Globals.init(overrides);
+  Globals.init({ SOURCE_FALLBACK_ORDER: '', ...overrides });
+  if (!overrides.SOURCE_FALLBACK_ORDER) Globals.envs.sourceFallbackOrderArr = [];
   useAsyncLocalStorage(AsyncLocalStorage);
   Globals.animes = [];
   Globals.commentCache = new Map();
